@@ -11,5 +11,5 @@ class YoloEval:
                 result.save(filename=f"results_{i}.jpg")
 
 if __name__ == "__main__":
-    yolo_eval = YoloEval("path/to/model_weight/best.pt")
+    yolo_eval = YoloEval("/home/junsu/Rokey_Cobot2/rokey_fruit.pt")
     yolo_eval.eval(["sample_test.jpg"], img_save=True)
