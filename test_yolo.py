@@ -6,13 +6,13 @@ import cv2
 from ultralytics import YOLO
 
 class YoloCameraNode(Node):
-    def __init__(self, model_path):
+    def __init__(self):
         super().__init__('yolo_camera_node')
         
         # 1. YOLO 모델 로드
-        self.model = YOLO(model_path)
+        self.model = YOLO("./rokey_fruit.pt")
         self.bridge = CvBridge()
-        
+
         # 💡 [구독] 뎁스 카메라의 컬러 이미지 토픽을 구독합니다.
         # 준수님의 실제 카메라 토픽명으로 변경 가능 (예: '/camera/camera/color/image_raw')
         self.subscription = self.create_subscription(
@@ -66,7 +66,7 @@ class YoloCameraNode(Node):
 def main(args=None):
     rclpy.init(args=args)
     # 준수님의 실제 모델 경로를 넣어주세요.
-    node = YoloCameraNode("/home/junsu/Rokey_Cobot2/rokey_fruit.pt")
+    node = YoloCameraNode()
     try:
         rclpy.spin(node)
     except KeyboardInterrupt:
