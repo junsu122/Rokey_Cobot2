@@ -23,7 +23,7 @@ setup(
     maintainer_email='user@example.com',
     description='Gesture robot control nodes',
     license='Apache-2.0',
-    tests_require=['pytest'],
+    # tests_require=['pytest'],
     entry_points={
         'console_scripts': [
             'webcam_teleop_node  = gesture_robot_pkg.webcam_teleop_node:main',
