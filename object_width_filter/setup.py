@@ -38,6 +38,7 @@ setup(
             'no_ground = object_width_filter.no_ground:main',
             'publish_angle = object_width_filter.publish_angle:main',
             'z_normalization = object_width_filter.z_normalization:main',
+            'vision_node2publish_angle = object_width_filter.vision_node2publish_angle:main',
 
 ############################################## 테스트 코드 #############################################
 

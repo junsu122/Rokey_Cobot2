@@ -34,4 +34,11 @@ def generate_launch_description():
             # name='advanced_ground_remover',     # 실행될 때 노드 이름 (선택)
             output='screen'               # 로그 출력 설정
         ),
+
+        Node(
+            package='object_width_filter',  # 패키지 이름
+            executable='vision_node2publish_angle', # setup.py에 등록된 실행 파일 이름
+            # name='advanced_ground_remover',     # 실행될 때 노드 이름 (선택)
+            output='screen'               # 로그 출력 설정
+        ),
     ])

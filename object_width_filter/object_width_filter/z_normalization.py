@@ -185,7 +185,7 @@ class ZNormalizationEdgeNode(Node):
             if len(marker_array.markers) > 1:
                 self.marker_publisher.publish(marker_array)
 
-            self.get_logger().info(f"🎯 [완료] 객체: {valid_cluster_count}개 감지 및 정밀 곡선 엣지 생성 완료.")
+            # self.get_logger().info(f"🎯 [완료] 객체: {valid_cluster_count}개 감지 및 정밀 곡선 엣지 생성 완료.") ##런치시 제외
 
         except Exception as e:
             self.get_logger().error(f"Error: {e}")

@@ -1,0 +1,14 @@
+# ── Goal ──────────────────────────────────────────────
+string label               # 물체 이름 (로그/피드백 표시용)
+int32[4] box               # RealSense 이미지 내 bbox [x1,y1,x2,y2]
+float32[6] robot_tcp       # 선택 시점 TCP [x,y,z,rx,ry,rz] mm+deg
+
+---
+# ── Result ────────────────────────────────────────────
+bool success
+string message
+
+---
+# ── Feedback ──────────────────────────────────────────
+string stage       # APPROACH | OPEN_GRIPPER | DESCEND | GRASP | LIFT | HOME
+float32 progress   # 0.0 ~ 1.0
