@@ -226,7 +226,7 @@ class WebcamTeleopNode(Node):
         if self._target_pos is None or self._prev_target[0] is None:
             return
         with self._pending_lock:
-            if self._pending_count >= 4:
+            if self._pending_count >= 2:   ##5.7 수정부  4->2
                 return
         delta_xyz = [self._target_pos[i] - self._prev_target[i] for i in range(3)]
         dist = sum(d ** 2 for d in delta_xyz) ** 0.5
@@ -263,7 +263,7 @@ class WebcamTeleopNode(Node):
         req.vel        = [ABS_VEL,  50.0]
         req.acc        = [ABS_ACC, 100.0]
         req.time       = 0.0
-        req.radius     = ABS_BLEND_R
+        req.radius     = max(ABS_BLEND_R, sum(abs(d) for d in delta) * 0.5) # 스텝 크기에 비례하도록 변경. 원본: ABS_BLEND_R
         req.ref        = 0
         req.mode       = 1
         req.blend_type = 1
@@ -461,6 +461,8 @@ class WebcamTeleopNode(Node):
                 else:
                     dx, dy, dz  = compute_delta(avg_x, avg_y, curr_dist, self._base_dist)
                     self._delta = [dx, dy, dz]
+                    if dx == 0.0 and dy == 0.0 and dz == 0.0:
+                        self._smooth_delta = [0.0, 0.0, 0.0]
 
         elif self._state == STATE_PAUSED:
             if not fist:

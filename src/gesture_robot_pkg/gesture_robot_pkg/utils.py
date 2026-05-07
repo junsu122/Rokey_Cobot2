@@ -102,7 +102,7 @@ def compute_target(avg_x: float, avg_y: float,
 
     tx = calib_tcp[0] + (-rx * RANGE_X_MM)
     ty = calib_tcp[1] + ( rd * RANGE_Y_MM)
-    tz = calib_tcp[2] + (-ry * RANGE_Z_MM)
+    tz = calib_tcp[2] + (ry * RANGE_Z_MM) # y값 반전을 위한 ry 부호 반전 5.7 수정부
 
     tx = float(np.clip(tx, calib_tcp[0] - LIMIT_X_MM, calib_tcp[0] + LIMIT_X_MM))
     ty = float(np.clip(ty, calib_tcp[1] - LIMIT_Y_MM, calib_tcp[1] + LIMIT_Y_MM))
