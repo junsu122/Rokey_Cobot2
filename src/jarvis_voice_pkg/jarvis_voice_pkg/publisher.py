@@ -8,9 +8,8 @@ ROS2 토픽 발행 + 콘솔 로그 모듈
     /voice_command   : STT 결과 텍스트
     /intent_result   : Intent JSON 전체
     /tts_output      : TTS 메시지
-    /voice_cancel    : 취소 신호 (cancel intent 시)
-    /voice_intent    : Vision 연동용 (bring_* intent 시)
-    /scan_request    : 작업공간 스캔 요청 + 취소 명령
+    /voice_intent    : Vision 연동용 (bring_object intent 시)
+    /scan_request    : 작업공간 스캔 요청 + 취소 명령 (cancel intent 시 포함)
 
 구독 토픽:
     /object_not_found : vision_node에서 물체 미감지 시 수신
@@ -36,7 +35,7 @@ except ImportError:
 
 
 # ── Vision 연동 대상 intent ───────────────────────────────────────────────────
-ROBOT_INTENTS = ("bring_water", "bring_medicine", "bring_food")
+ROBOT_INTENTS = ("bring_object",)
 
 # 스캔 타임아웃 (초)
 SCAN_TIMEOUT_SEC = 60.0
@@ -53,7 +52,6 @@ class DualOutputPublisher:
         self._voice_pub           = None
         self._intent_pub          = None
         self._tts_pub             = None
-        self._cancel_pub          = None
         self._voice_intent_pub    = None
         self._scan_request_pub    = None
 
@@ -74,8 +72,6 @@ class DualOutputPublisher:
                 String, Config.TOPIC_INTENT,       10)
             self._tts_pub    = self._node.create_publisher(
                 String, Config.TOPIC_TTS,          10)
-            self._cancel_pub = self._node.create_publisher(
-                String, Config.TOPIC_CANCEL,       10)
             self._voice_intent_pub = self._node.create_publisher(
                 String, Config.TOPIC_VOICE_INTENT, 10)
             self._scan_request_pub = self._node.create_publisher(
@@ -185,7 +181,7 @@ class DualOutputPublisher:
                 # /voice_intent 재발행 → vision_node pick 수행
                 for obj in found_objects:
                     self._pub(self._voice_intent_pub, self._with_timestamp({
-                        "action"       : "bring_food",
+                        "action"       : "bring_object",
                         "target_object": [obj["label"]],
                         "urgency"      : "normal",
                         "from_scan"    : True,
@@ -276,9 +272,10 @@ class DualOutputPublisher:
                 "message": tts_msg,
             }))
 
+            # ── cancel intent → /scan_request 로 취소 명령 발행 ──────────
             if is_cancel:
-                self._pub(self._cancel_pub, self._with_timestamp({
-                    "action": "stop",
+                self._pub(self._scan_request_pub, self._with_timestamp({
+                    "action": "cancel",
                     "reason": "user_cancel",
                 }))
 
@@ -302,7 +299,7 @@ class DualOutputPublisher:
         print(f"  {Config.TOPIC_INTENT:<26} → intent={intent_name}")
         print(f"  {Config.TOPIC_TTS:<26} → \"{tts_msg}\"")
         if is_cancel:
-            print(f"  {Config.TOPIC_CANCEL:<26} → stop (Replanning)")
+            print(f"  {Config.TOPIC_SCAN_REQUEST:<26} → cancel (user_cancel)")
         if is_robot:
             print(f"  {Config.TOPIC_VOICE_INTENT:<26} → "
                   f"target={intent_result.get('target_object')}")

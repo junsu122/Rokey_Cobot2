@@ -40,9 +40,8 @@ class Config:
     TOPIC_VOICE_CMD    : str = "/voice_command"
     TOPIC_INTENT       : str = "/intent_result"
     TOPIC_TTS          : str = "/tts_output"
-    TOPIC_CANCEL       : str = "/voice_cancel"
     TOPIC_VOICE_INTENT : str = "/voice_intent"       # vision_node 연동
-    TOPIC_SCAN_REQUEST : str = "/scan_request"       # 작업공간 스캔 요청
+    TOPIC_SCAN_REQUEST : str = "/scan_request"       # 작업공간 스캔 요청 + 취소
 
     # ROS2 토픽 — 구독
     TOPIC_OBJECT_NOT_FOUND : str = "/object_not_found"  # vision_node 미감지
