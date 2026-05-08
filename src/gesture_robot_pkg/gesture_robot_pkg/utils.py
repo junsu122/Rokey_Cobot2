@@ -150,7 +150,7 @@ def get_orientation_offset(box: list) -> float:
         return 0.0
     ratio = w / h
     if ratio >= ASPECT_THRESHOLD:
-        return 90.0
+        return 0.0
     return 0.0
 
 
