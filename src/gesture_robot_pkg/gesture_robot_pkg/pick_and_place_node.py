@@ -783,9 +783,18 @@ class PickAndPlaceNode(Node):
             p80 = float(np.percentile(full_valid, 80))
             obj_top_mm    = float(np.median(full_valid[full_valid <= p20]))
             bbox_table_mm = float(np.median(full_valid[full_valid >= p80]))
+
+            # 하위 20% 픽셀들의 실제 위치 중심으로 cx, cy 갱신
+            top_mask = (full_roi > PICK_MIN_DEPTH_MM) & (full_roi <= p20)
+            ys, xs = np.where(top_mask)
+            if len(xs) > 0:
+                cx = int(np.clip(int(np.mean(xs)) + x1, 0, dw - 1))
+                cy = int(np.clip(int(np.mean(ys)) + y1, 0, dh - 1))
+
             self.get_logger().info(
                 f'[DEPTH] bbox 하위20%→물체={obj_top_mm:.1f}mm  '
-                f'상위20%→테이블후보={bbox_table_mm:.1f}mm')
+                f'상위20%→테이블후보={bbox_table_mm:.1f}mm  '
+                f'꼭대기중심=({cx},{cy})')
 
         # ── table_mm 결정 (우선순위) ──
         table_mm = None
