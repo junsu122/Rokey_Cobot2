@@ -101,9 +101,9 @@ class ClickAngleExtractorNode(Node):
 
         # 3) 결과 발행
         angle_msg = Float32()
-        angle_msg.data = float(angle_deg)
+        angle_msg.data = float(-angle_deg)
         self.angle_pub.publish(angle_msg)
-        self.get_logger().info(f"🎯 매칭 성공! [{class_name}] | 거리: {min_dist:.3f}m | 각도: {angle_deg:.2f}°")
+        self.get_logger().info(f"🎯 매칭 성공! [{class_name}] | 거리: {min_dist:.3f}m | 각도: {-angle_deg:.2f}°")
         
         # 4) 시각화 (/min_length 발행)
         self.publish_visual_markers(selected_marker, mean_2d, minor_axis_vector, z_height)

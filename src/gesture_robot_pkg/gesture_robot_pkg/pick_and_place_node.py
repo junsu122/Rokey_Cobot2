@@ -158,6 +158,13 @@ class PickAndPlaceNode(Node):
 
         self.get_logger().info('PickAndPlaceNode ready')
 
+    # ── 코드 실행시 home으로 이동 로직 ───────────────────────────── ###################################### 홈으로 잘 가는지 확인필요
+        self.get_logger().info("🚀 [PICK_AND_PLACE_NODE] Initialized & Ready") 
+
+        # [추가] 노드 시작 시 로봇을 홈 위치로 자동 이동
+        self._home_timer = self.create_timer(1.0, self._initial_home_move, callback_group=self._cb_group)
+
+
     # ── 구독 콜백 ─────────────────────────────────────────────────────────
 
     def _depth_cb(self, msg: Image):
@@ -837,6 +844,38 @@ class PickAndPlaceNode(Node):
             f'[DEPTH] 물체(cam): X={X*1000:.1f}  Y={Y*1000:.1f}  Z={Z*1000:.1f}mm  |  '
             f'테이블(cam): Z={Z_t*1000:.1f}mm')
         return [X, Y, Z], [X_t, Y_t, Z_t]
+    
+########################################################################################### 실행시 홈으로 가기 로직 추가
+    def _initial_home_move(self):
+        if self._home_timer:
+            self._home_timer.cancel()
+
+        self.get_logger().info("🏠 [INIT] 노드 시작: 홈 위치로 이동을 시도합니다.")
+
+        # 별도 스레드에서 실행하되 spin_until_future_complete를 제거합니다.
+        def run_home():
+            try:
+                if not self._movej_cli.wait_for_service(timeout_sec=5.0):
+                    self.get_logger().warn('[INIT] 서비스 미연결')
+                    return
+
+                req = MoveJoint.Request()
+                req.pos = [float(v) for v in HOME_JOINT]
+                req.vel, req.acc = float(PICK_VEL), float(PICK_ACC)
+                req.sync_type = 0 # 로봇 드라이버 단에서 블로킹 대기
+
+                # .call()을 사용하여 이 스레드만 블로킹되게 합니다 (spin_until_... 대신)
+                # MultiThreadedExecutor이므로 다른 스레드에서 액션 콜백은 계속 돕니다.
+                res = self._movej_cli.call(req)
+                
+                if res and res.success:
+                    self.get_logger().info('🏠 [INIT] 홈 위치 이동 완료')
+                else:
+                    self.get_logger().warn('🏠 [INIT] 홈 위치 이동 실패')
+            except Exception as e:
+                self.get_logger().error(f'🏠 [INIT] 예외: {e}')
+
+        threading.Thread(target=run_home, daemon=True).start()
 
 
 def main(args=None):
