@@ -174,10 +174,15 @@ class PickAndPlaceNode(Node):
             if raw.dtype == np.uint16:
                 mm = raw.astype(np.float32)
             elif raw.dtype in (np.float32, np.float64):
-                nz = raw[raw > 0]
-                mm = (raw.astype(np.float32) * 1000.0
-                      if (len(nz) and float(np.median(nz)) < 10.0)
-                      else raw.astype(np.float32))
+                if msg.encoding == '32FC1':
+                    # RealSense 32FC1 → 미터 단위, mm로 변환
+                    mm = raw.astype(np.float32) * 1000.0
+                else:
+                    # 그 외: 유한값만 골라 median으로 단위 추정 (fallback)
+                    nz = raw[(raw > 0) & np.isfinite(raw)]
+                    mm = (raw.astype(np.float32) * 1000.0
+                          if (len(nz) and float(np.median(nz)) < 10.0)
+                          else raw.astype(np.float32))
             else:
                 mm = raw.astype(np.float32)
             with self._depth_lock:
