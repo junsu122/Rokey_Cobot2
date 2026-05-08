@@ -70,6 +70,7 @@ from gesture_robot_pkg.constants import (
     APPROACH_MIN_MM, APPROACH_MAX_MM,
     LIFT_MIN_MM, LIFT_MAX_MM,
     PICK_EXTRA_DESCENT_MM,
+    GRIPPER_TABLE_CLEARANCE_MM,
     HOME_JOINT,
     PICK_SAFE_Z_MIN_MM, PICK_SAFE_Z_MAX_MM,
     PICK_OFFSET_X_MM, PICK_OFFSET_Y_MM, PICK_OFFSET_Z_MM,
@@ -404,7 +405,7 @@ class PickAndPlaceNode(Node):
         #   물체가 얇으면 → h - clearance (테이블 충돌 방지 우선)
         h          = float(obj_height_robot_z)
         approach_h = float(np.clip(h * 1.0, APPROACH_MIN_MM, APPROACH_MAX_MM))
-        descent_d  = float(h * 0.5) + PICK_EXTRA_DESCENT_MM
+        descent_d  = min(float(h * 0.5) + PICK_EXTRA_DESCENT_MM, h - GRIPPER_TABLE_CLEARANCE_MM)
         lift_h     = float(np.clip(h * 1.5, LIFT_MIN_MM,     LIFT_MAX_MM))
 
         self.get_logger().info(
