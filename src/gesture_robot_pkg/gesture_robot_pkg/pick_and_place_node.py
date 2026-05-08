@@ -74,7 +74,7 @@ from gesture_robot_pkg.constants import (
     PICK_SAFE_Z_MIN_MM, PICK_SAFE_Z_MAX_MM,
     PICK_OFFSET_X_MM, PICK_OFFSET_Y_MM, PICK_OFFSET_Z_MM,
 )
-from gesture_robot_pkg.utils import transform_camera_to_base, get_orientation_offset
+from gesture_robot_pkg.utils import transform_camera_to_base
 
 
 class PickAndPlaceNode(Node):
@@ -91,7 +91,7 @@ class PickAndPlaceNode(Node):
             self._angle_cb, 
             10,
             callback_group=self._cb_group)
-        self._spin_angle = 0.0 # 수신된 각도를 저장할 변수  ####################각도 변환 준수가 쓰는 변수####################3
+        self._spin_angle = 180.0 # 수신된 각도를 저장할 변수  ####################각도 변환 준수가 쓰는 변수####################3
 
 
         # ── 액션 서버 ─────────────────────────────────────────────────────
@@ -356,9 +356,7 @@ class PickAndPlaceNode(Node):
                 f'dX={PICK_OFFSET_X_MM:+.1f}  dY={PICK_OFFSET_Y_MM:+.1f}  dZ={PICK_OFFSET_Z_MM:+.1f}mm  '
                 f'→ X={base_xyz[0]:.1f}  Y={base_xyz[1]:.1f}  Z={base_xyz[2]:.1f}')
 
-        rz_offset   = get_orientation_offset(list(goal.box))
         orientation = list(robot_tcp[3:])
-        orientation[2] += rz_offset
         pick_target = list(base_xyz) + orientation
 
         # ── 워크스페이스 Z 안전 범위 검증 ──────────────────────────────
@@ -603,10 +601,9 @@ class PickAndPlaceNode(Node):
         절대값 개념으로 6번 축(rz)만 독립적으로 회전시키는 단계.
         /object_angle 토픽으로 받은 최신 self._spin_angle을 반영합니다.
         """
-        rz_offset = get_orientation_offset(list(self._current_goal_box)) 
-        target_rz = self._spin_angle + rz_offset
+        target_rz = self._spin_angle
         spin_pos = [pt[0], pt[1], pt[2]] + list(pt[3:5]) + [target_rz]
-        
+
         self.get_logger().info(f'  [SPIN_CHUCK] target_rz={target_rz:.1f}°')
         await self._movel_async(spin_pos, PICK_VEL, PICK_ACC)
         time.sleep(0.2)

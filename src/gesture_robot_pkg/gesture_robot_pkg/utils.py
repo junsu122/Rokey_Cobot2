@@ -44,7 +44,7 @@ def get_palm_center_norm(landmarks):
     ids = [0, 5, 9, 13, 17]
     px  = float(np.mean([landmarks[i].x for i in ids]))
     py  = float(np.mean([landmarks[i].y for i in ids]))
-    return px, py
+    return px, -py
 
 
 def is_in_center(avg_x: float, avg_y: float) -> bool:
@@ -104,11 +104,11 @@ def compute_target(avg_x: float, avg_y: float,
     ty = calib_tcp[1] + ( rd * RANGE_Y_MM)
     tz = calib_tcp[2] + (ry * RANGE_Z_MM) # y값 반전을 위한 ry 부호 반전 5.7 수정부
 
-    tx = float(np.clip(tx, calib_tcp[0] - LIMIT_X_MM, calib_tcp[0] + LIMIT_X_MM))
+    tx = float(np.clip(-tx, calib_tcp[0] - LIMIT_X_MM, calib_tcp[0] + LIMIT_X_MM))
     ty = float(np.clip(ty, calib_tcp[1] - LIMIT_Y_MM, calib_tcp[1] + LIMIT_Y_MM))
-    tz = float(np.clip(tz, calib_tcp[2] - LIMIT_Z_MM, calib_tcp[2] + LIMIT_Z_MM))
+    tz = float(np.clip(-tz, calib_tcp[2] - LIMIT_Z_MM, calib_tcp[2] + LIMIT_Z_MM))
 
-    return [tx, ty, tz, calib_tcp[3], calib_tcp[4], calib_tcp[5]]
+    return [tx, -ty, tz, calib_tcp[3], calib_tcp[4], calib_tcp[5]]
 
 
 # ══════════════════════════════════════════════════════
