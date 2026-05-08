@@ -10,7 +10,7 @@ import os
 
 _PKG_SHARE = get_package_share_directory('gesture_robot_pkg')
 
-YOLO_MODEL_PATH  = os.path.join(_PKG_SHARE, 'data', '5.7best.pt')
+YOLO_MODEL_PATH  = os.path.join(_PKG_SHARE, 'data', '5.8best.pt')
 GRIPPER2CAM_PATH = os.path.join(_PKG_SHARE, 'data', 'T_gripper2camera.npy')
 
 

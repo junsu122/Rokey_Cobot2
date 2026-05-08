@@ -32,7 +32,7 @@ def generate_launch_description():
     yolo_model_arg = DeclareLaunchArgument(
         'yolo_model',
         default_value=PathJoinSubstitution([
-            FindPackageShare('gesture_robot_pkg'), 'data', 'yolov8n.pt'
+            FindPackageShare('gesture_robot_pkg'), 'data', '5.8best.pt'
         ]),
         description='Path to YOLOv8 weights file')
 
