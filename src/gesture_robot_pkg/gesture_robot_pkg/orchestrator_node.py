@@ -1,0 +1,195 @@
+"""
+orchestrator_node.py
+────────────────────
+책임:
+  1. GestureEvent 구독 → teleop enable/disable
+  2. SelectedObject 구독 → pick-and-place 트리거
+  3. robot_state 구독 → TCP 캐시 (pick_and_place_node 에도 동일하게 구독됨)
+  4. PickAndPlace 액션 결과 수신 → teleop 재개
+
+퍼블리시:  /teleop/enable   (std_msgs/Bool)
+           /is_picking       (std_msgs/Bool)
+구독:      /gesture_event   (GestureEvent)
+           /selected_object (SelectedObject)
+           /{ROBOT_ID}/state (dsr_msgs2/RobotState)
+액션 클라이언트: /pick_and_place (PickAndPlace)
+"""
+
+import threading
+
+import rclpy
+from rclpy.node import Node
+from rclpy.action import ActionClient
+from rclpy.executors import MultiThreadedExecutor
+from rclpy.callback_groups import ReentrantCallbackGroup
+from std_msgs.msg import Bool
+from dsr_msgs2.msg import RobotState
+
+from gesture_robot_interfaces.msg import GestureEvent, SelectedObject
+from gesture_robot_interfaces.action import PickAndPlace
+from gesture_robot_pkg.constants import ROBOT_ID, STATE_CONTROLLING
+
+
+class OrchestratorNode(Node):
+
+    def __init__(self):
+        super().__init__('orchestrator_node')
+
+        self._cb_group = ReentrantCallbackGroup()
+
+        # ── 퍼블리셔 ──────────────────────────────────
+        self._pub_teleop     = self.create_publisher(Bool, '/teleop/enable',  10)
+        self._pub_is_picking = self.create_publisher(Bool, '/is_picking',     10)
+
+        # ── 구독 ─────────────────────────────────────
+        self.create_subscription(
+            GestureEvent, '/gesture_event', self._gesture_cb, 10,
+            callback_group=self._cb_group)
+        self.create_subscription(
+            SelectedObject, '/selected_object', self._selected_obj_cb, 10,
+            callback_group=self._cb_group)
+        self.create_subscription(
+            RobotState, f'/{ROBOT_ID}/state', self._robot_state_cb, 10,
+            callback_group=self._cb_group)
+
+        # ── PickAndPlace 액션 클라이언트 ────────────
+        self._pick_client = ActionClient(
+            self, PickAndPlace, '/pick_and_place',
+            callback_group=self._cb_group)
+        self.get_logger().info('Waiting for /pick_and_place action server...')
+        if not self._pick_client.wait_for_server(timeout_sec=5.0):
+            self.get_logger().warn('/pick_and_place server not found — pick will be queued')
+
+        # ── 내부 상태 ──────────────────────────────────
+        self._gesture_state       = ''
+        self._is_picking          = False
+        self._pick_lock           = threading.Lock()   # _is_picking 원자적 체크-앤-셋
+        self._teleop_ever_enabled = False
+        self._current_pos         = [0.0] * 6
+        self._pos_received        = False
+
+        self._set_teleop(False)
+        self.get_logger().info('OrchestratorNode ready')
+
+    # ── 구독 콜백 ─────────────────────────────────────
+
+    def _robot_state_cb(self, msg: RobotState):
+        if len(msg.current_posx) >= 6:
+            self._current_pos  = list(msg.current_posx)
+            self._pos_received = True
+
+    def _gesture_cb(self, msg: GestureEvent):
+        prev               = self._gesture_state
+        self._gesture_state = msg.gesture_state
+
+        if msg.gesture_state == STATE_CONTROLLING and not self._is_picking:
+            if not self._teleop_ever_enabled or prev != STATE_CONTROLLING:
+                self._teleop_ever_enabled = True
+                self._set_teleop(True)
+        elif msg.gesture_state != STATE_CONTROLLING and not self._is_picking:
+            self._set_teleop(False)
+
+    def _selected_obj_cb(self, msg: SelectedObject):
+        """물체가 선택되면 텔레오퍼레이션을 중지하고 pick-and-place를 시작한다."""
+        with self._pick_lock:
+            if self._is_picking:
+                self.get_logger().warn('[PICK SKIP] already picking')
+                return
+            self._is_picking = True   # 체크와 셋을 락 안에서 원자적으로 처리
+
+        if not self._pos_received:
+            self.get_logger().warn(
+                '[PICK WARN] robot state not yet received — TCP may be zero. '
+                'Proceeding anyway (pick_and_place_node will wait for TCP).')
+
+        self.get_logger().info(
+            f'[PICK START] label={msg.label}  box={list(msg.box)}  '
+            f'TCP={[f"{v:.1f}" for v in self._current_pos[:3]]}  '
+            f'gesture={self._gesture_state}')
+
+        self._set_teleop(False)
+        self._set_is_picking(True)
+        self._send_pick_goal(msg)
+
+    # ── 액션 ─────────────────────────────────────────
+
+    def _send_pick_goal(self, obj_msg: SelectedObject):
+        try:
+            goal           = PickAndPlace.Goal()
+            goal.label     = obj_msg.label
+            goal.box       = [int(v) for v in obj_msg.box]
+            goal.robot_tcp = [float(v) for v in self._current_pos]
+
+            fut = self._pick_client.send_goal_async(
+                goal, feedback_callback=self._pick_feedback_cb)
+            fut.add_done_callback(self._pick_goal_accepted_cb)
+        except Exception as e:
+            self.get_logger().error(f'[SEND GOAL] {e}')
+            self._on_pick_done(success=False)
+
+    def _pick_goal_accepted_cb(self, future):
+        try:
+            gh = future.result()
+        except Exception as e:
+            self.get_logger().error(f'[PICK] send_goal exception: {e}')
+            self._on_pick_done(success=False)
+            return
+        if not gh.accepted:
+            self.get_logger().error('[PICK] goal rejected')
+            self._on_pick_done(success=False)
+            return
+        self.get_logger().info('[PICK] goal accepted')
+        gh.get_result_async().add_done_callback(self._pick_result_cb)
+
+    def _pick_feedback_cb(self, feedback_msg):
+        fb = feedback_msg.feedback
+        self.get_logger().info(
+            f'[PICK FB] stage={fb.stage}  {fb.progress*100:.0f}%')
+
+    def _pick_result_cb(self, future):
+        try:
+            res = future.result().result
+            self.get_logger().info(
+                f'[PICK RESULT] success={res.success}  "{res.message}"')
+            self._on_pick_done(success=res.success)
+        except Exception as e:
+            self.get_logger().error(f'[PICK] result exception: {e}')
+            self._on_pick_done(success=False)
+
+    def _on_pick_done(self, success: bool):
+        with self._pick_lock:
+            self._is_picking = False
+        self._set_is_picking(False)
+        if self._gesture_state == STATE_CONTROLLING:
+            self._set_teleop(True)
+        self.get_logger().info(f'[PICK DONE] success={success}  teleop resumed')
+
+    # ── 헬퍼 ─────────────────────────────────────────
+
+    def _set_teleop(self, enabled: bool):
+        msg      = Bool()
+        msg.data = enabled
+        self._pub_teleop.publish(msg)
+        # self.get_logger().info(f'[TELEOP] enable={enabled}')
+
+    def _set_is_picking(self, picking: bool):
+        msg      = Bool()
+        msg.data = picking
+        self._pub_is_picking.publish(msg)
+
+
+def main(args=None):
+    rclpy.init(args=args)
+    node = OrchestratorNode()
+    executor = MultiThreadedExecutor()
+    executor.add_node(node)
+    try:
+        executor.spin()
+    finally:
+        executor.shutdown()
+        node.destroy_node()
+        rclpy.shutdown()
+
+
+if __name__ == '__main__':
+    main()
