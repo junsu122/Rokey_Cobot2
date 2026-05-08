@@ -71,6 +71,7 @@ from gesture_robot_pkg.constants import (
     LIFT_MIN_MM, LIFT_MAX_MM,
     PICK_EXTRA_DESCENT_MM,
     GRIPPER_TABLE_CLEARANCE_MM,
+    SPIN_ANGLE_OFFSET,
     HOME_JOINT,
     PICK_SAFE_Z_MIN_MM, PICK_SAFE_Z_MAX_MM,
     PICK_OFFSET_X_MM, PICK_OFFSET_Y_MM, PICK_OFFSET_Z_MM,
@@ -452,14 +453,14 @@ class PickAndPlaceNode(Node):
         stages = [
             ('APPROACH',     self._stage_approach,     pick_target, approach_h),
             ('OPEN_GRIPPER', self._stage_open_gripper),
+            ('SPIN_CHUCK',   self._stage_spin_angle,   pick_target, approach_h),
             ('DESCEND',      self._stage_descend,      pick_target, descent_d),
-            ('SPIN_CHUCK',   self._stage_spin_angle,   [pick_target[0], pick_target[1], pick_target[2]-descent_d] + orientation),
             ('GRASP',        self._stage_grasp),
             ('LIFT',         self._stage_lift,         pick_target, lift_h),
             ('HOME',         self._stage_home),
         ]
 
-        GRASP_INDEX = 3
+        GRASP_INDEX = 4
         grasped = False
 
         for i, (stage_name, stage_fn, *fn_args) in enumerate(stages):
@@ -609,15 +610,23 @@ class PickAndPlaceNode(Node):
         time.sleep(0.4)
 
 ###################################################준수추가코드###################################################
-    async def _stage_spin_angle(self, pt: list):
+    async def _stage_spin_angle(self, pt: list, z_offset: float = 0.0):
         """
-        절대값 개념으로 6번 축(rz)만 독립적으로 회전시키는 단계.
-        /object_angle 토픽으로 받은 최신 self._spin_angle을 반영합니다.
+        approach 높이(z_offset)에서 rz를 회전한 뒤, pick_target(pt)의 rz를 in-place 갱신.
+        이후 DESCEND / LIFT 등 모든 단계가 갱신된 rz를 그대로 유지한다.
+        target_rz = 현재 rz + spin_angle(물체 각도 오프셋) + SPIN_ANGLE_OFFSET(프레임 보정)
         """
-        target_rz = self._spin_angle
-        spin_pos = [pt[0], pt[1], pt[2]] + list(pt[3:5]) + [target_rz]
+        current_rz = pt[5]
+        target_rz  = current_rz + self._spin_angle + SPIN_ANGLE_OFFSET
+        pt[5]      = target_rz   # pick_target rz를 갱신 → 이후 모든 단계에 반영
 
-        self.get_logger().info(f'  [SPIN_CHUCK] target_rz={target_rz:.1f}°')
+        spin_pos = [pt[0], pt[1], pt[2] + z_offset, pt[3], pt[4], target_rz]
+
+        self.get_logger().info(
+            f'  [SPIN_CHUCK] current_rz={current_rz:.1f}°  '
+            f'offset={self._spin_angle:.1f}°  '
+            f'frame_correction={SPIN_ANGLE_OFFSET:.1f}°  '
+            f'→ target_rz={target_rz:.1f}°  (z_offset={z_offset:.1f}mm)')
         await self._movel_async(spin_pos, PICK_VEL, PICK_ACC)
         time.sleep(0.2)
 ###################################################################################################

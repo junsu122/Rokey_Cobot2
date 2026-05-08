@@ -21,7 +21,7 @@ ROBOT_TOOL  = "Tool Weight"
 ROBOT_TCP   = "GripperDA_v1"
 
 # ── 카메라 ────────────────────────────────────────────────────────────
-WEBCAM_INDEX          = 0
+WEBCAM_INDEX          = 6
 REALSENSE_COLOR_TOPIC = '/camera/camera/color/image_raw'
 REALSENSE_DEPTH_TOPIC = '/camera/camera/aligned_depth_to_color/image_raw'
 REALSENSE_INFO_TOPIC  = '/camera/camera/color/camera_info'
@@ -70,6 +70,7 @@ LIFT_MAX_MM     = 200.0
 # 그리퍼 손가락이 테이블에 닿는 경우 이 값을 늘려서 튜닝.
 GRIPPER_TABLE_CLEARANCE_MM = 8.0
 PICK_EXTRA_DESCENT_MM      = 30.0  # 기본 하강량에 추가로 더 내려가는 거리(mm)
+SPIN_ANGLE_OFFSET          = 0.0   # 센서 프레임↔로봇 베이스 프레임 yaw 오차 보정값(deg), 실측 후 튜닝
 
 # ── 물체 방향 보정 ────────────────────────────────────────────────────
 ASPECT_THRESHOLD = 1.2
