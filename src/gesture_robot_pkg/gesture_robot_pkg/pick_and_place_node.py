@@ -839,6 +839,8 @@ class PickAndPlaceNode(Node):
             if len(xs) > 0:
                 cx = int(np.clip(int(np.mean(xs)) + x1, 0, dw - 1))
                 cy = int(np.clip(int(np.mean(ys)) + y1, 0, dh - 1))
+            self.get_logger().info(
+                f'[PIXEL] depth target pixel -> x={cx}, y={cy}')
 
             self.get_logger().info(
                 f'[DEPTH] bbox 하위20%→물체={obj_top_mm:.1f}mm  '
@@ -892,6 +894,9 @@ class PickAndPlaceNode(Node):
         X = (cx - ppx) * depth_m / fx
         Y = (cy - ppy) * depth_m / fy
         Z = depth_m + PICK_DEPTH_OFFSET * 0.001
+        self.get_logger().info(
+        f'[DEPTH] box=[{x1},{y1},{x2},{y2}]  cx={cx} cy={cy}  '
+        f'fx={fx:.1f} fy={fy:.1f}')
 
         table_m       = table_mm * 0.001
         X_t = (cx - ppx) * table_m / fx
