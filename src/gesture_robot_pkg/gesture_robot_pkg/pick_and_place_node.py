@@ -57,6 +57,7 @@ from rclpy.callback_groups import ReentrantCallbackGroup
 from sensor_msgs.msg import Image, CameraInfo
 from dsr_msgs2.srv import MoveLine, MoveJoint, SetRobotMode, GetCurrentPosx
 from dsr_msgs2.msg import RobotState
+from std_msgs.msg import Float32MultiArray # 상단에 임포트 추가
 
 from gesture_robot_interfaces.action import PickAndPlace
 from gesture_robot_pkg.constants import (
@@ -94,6 +95,8 @@ class PickAndPlaceNode(Node):
             10,
             callback_group=self._cb_group)
         self._spin_angle = 180.0 # 수신된 각도를 저장할 변수  ####################각도 변환 준수가 쓰는 변수####################3
+
+        self.depth_info_pub = self.create_publisher(Float32MultiArray, '/object_depth_data', 10) ####################각도 변환 준수가 쓰는 데이터####################3
 
 
         # ── 액션 서버 ─────────────────────────────────────────────────────
@@ -451,6 +454,7 @@ class PickAndPlaceNode(Node):
 
         # ── 시퀀스 실행 ──────────────────────────────────────────────────
         stages = [
+            ('HOME',         self._stage_home),
             ('APPROACH',     self._stage_approach,     pick_target, approach_h),
             ('OPEN_GRIPPER', self._stage_open_gripper),
             ('SPIN_CHUCK',   self._stage_spin_angle,   pick_target, approach_h),
@@ -693,6 +697,7 @@ class PickAndPlaceNode(Node):
     async def _stage_home(self):
         self.get_logger().info(f'  HOME     → joints={HOME_JOINT}')
         await self._movej_async(HOME_JOINT, PICK_VEL, PICK_ACC)
+        time.sleep(3.0)
         if self._gripper is not None:
             self._gripper.open_gripper()
             self._wait_gripper(5.0)
@@ -902,6 +907,18 @@ class PickAndPlaceNode(Node):
         X_t = (cx - ppx) * table_m / fx
         Y_t = (cy - ppy) * table_m / fy
         Z_t = table_m
+
+        # 연산 로직 하단에 추가
+        depth_data_msg = Float32MultiArray()
+        # 순서대로 [cam_depth_h, depth_m, table_m] 저장
+        depth_data_msg.data = [
+            float(cam_depth_h), 
+            float(depth_m), 
+            float(table_m)
+        ]
+        self.depth_info_pub.publish(depth_data_msg)
+
+        self.get_logger().info(f"📤 Depth 데이터 발행 완료: {depth_data_msg.data}")
 
         self.get_logger().info(
             f'[DEPTH] 물체(cam): X={X*1000:.1f}  Y={Y*1000:.1f}  Z={Z*1000:.1f}mm  |  '
