@@ -72,7 +72,7 @@ from gesture_robot_pkg.constants import (
     PICK_EXTRA_DESCENT_MM,
     GRIPPER_TABLE_CLEARANCE_MM,
     SPIN_ANGLE_OFFSET,
-    HOME_JOINT,
+    HOME_JOINT, GIVE_JOINT, WAY_POINT_JOINT, GIVE_LINE,
     PICK_SAFE_Z_MIN_MM, PICK_SAFE_Z_MAX_MM,
     PICK_OFFSET_X_MM, PICK_OFFSET_Y_MM, PICK_OFFSET_Z_MM,
 )
@@ -457,7 +457,8 @@ class PickAndPlaceNode(Node):
             ('DESCEND',      self._stage_descend,      pick_target, descent_d),
             ('GRASP',        self._stage_grasp),
             ('LIFT',         self._stage_lift,         pick_target, lift_h),
-            ('HOME',         self._stage_home),
+            ('GIVE',         self._stage_give), ########## 전달해주는 로직 ############
+            ('Back_HOME',    self._stage_back_home), ########## 맨 처음 home으로 가는 로직 ##########
         ]
 
         GRASP_INDEX = 4
@@ -629,6 +630,39 @@ class PickAndPlaceNode(Node):
             f'→ target_rz={target_rz:.1f}°  (z_offset={z_offset:.1f}mm)')
         await self._movel_async(spin_pos, PICK_VEL, PICK_ACC)
         time.sleep(0.2)
+
+    async def _stage_give(self):
+        self.get_logger().info(f'  GIVE     → joints={GIVE_JOINT}')
+
+        await self._movej_async(WAY_POINT_JOINT, PICK_VEL, PICK_ACC)
+        time.sleep(0.5)
+       
+        await self._movej_async(GIVE_JOINT, PICK_VEL, PICK_ACC)
+        time.sleep(0.5)
+
+        await self._movel_async(GIVE_LINE, PICK_VEL, PICK_ACC)
+        time.sleep(0.5)
+
+        if self._gripper is not None:
+            self._gripper.open_gripper()
+            self._wait_gripper(5.0)
+
+
+    async def _stage_back_home(self):
+        self.get_logger().info(f'  Back_HOME → joints={HOME_JOINT}')
+        
+        await self._movej_async(GIVE_JOINT, PICK_VEL, PICK_ACC)
+        time.sleep(0.5)
+
+        await self._movej_async(HOME_JOINT, PICK_VEL, PICK_ACC)
+        time.sleep(0.5)
+
+        if self._gripper is not None:
+            try:
+                self._gripper.open_gripper()
+                self._wait_gripper(5.0)
+            except Exception as e:
+                self.get_logger().error(f'  [GRIPPER] Back_HOME 중 그리퍼 개방 실패: {e}')
 ###################################################################################################
 
     async def _stage_descend(self, pt: list, d: float):

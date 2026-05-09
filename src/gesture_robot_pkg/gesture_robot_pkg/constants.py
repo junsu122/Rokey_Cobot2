@@ -37,8 +37,11 @@ TOOLCHANGER_PORT = "502"
 # ── Pick & Place 기본값 ───────────────────────────────────────────────
 PICK_VEL            = 200
 PICK_ACC            = 200
-PICK_DEPTH_OFFSET   = 0.0          # mm
+PICK_DEPTH_OFFSET   = 30.0          # mm
 HOME_JOINT          = [0, 0, 90, 0, 90, 0]
+GIVE_JOINT          = [-47.52, -16.55, 101.54, 1.37, 94.23, -47.05]
+GIVE_LINE           = [176.72,-178.17,400.26,12.77,178.44,13.00]
+WAY_POINT_JOINT     = [-8.24, 1.14, 88.66, 1.92, 88.11, -6.78]
 PICK_MIN_DEPTH_MM   = 50.0    # v6 기준값 (D435 최소 유효 거리 고려 시 105 이상 권장)
 PICK_MAX_DEPTH_MM   = 1500.0
 DEPTH_SAMPLE_MARGIN = 8
