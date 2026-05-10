@@ -66,13 +66,16 @@ class VisionNode(Node):
         self.declare_parameter('yolo_model',              YOLO_MODEL_PATH)
         self.declare_parameter('yolo_conf',               YOLO_CONF_THRESHOLD)
         self.declare_parameter('hover_sec',               HOVER_SEC)
-        self.declare_parameter('voice_not_found_timeout', 3.0)  # 미발견 판정 대기 시간(초)
+        self.declare_parameter('voice_not_found_timeout', 3.0)  # 일반 voice 미발견 판정 대기(초)
+        self.declare_parameter('scan_yolo_timeout',       1.0)  # 스캔 후 YOLO 폴링 타임아웃(초)
 
-        self._yolo_path              = self.get_parameter('yolo_model').value
-        self._yolo_conf              = self.get_parameter('yolo_conf').value
-        self._hover_sec              = self.get_parameter('hover_sec').value
+        self._yolo_path               = self.get_parameter('yolo_model').value
+        self._yolo_conf               = self.get_parameter('yolo_conf').value
+        self._hover_sec               = self.get_parameter('hover_sec').value
         self._voice_not_found_timeout = float(
             self.get_parameter('voice_not_found_timeout').value)
+        self._scan_yolo_timeout       = float(
+            self.get_parameter('scan_yolo_timeout').value)
 
         # ── 퍼블리셔 ──────────────────────────────────────────────────────
         self._pub_obj       = self.create_publisher(SelectedObject, '/selected_object', 10)
@@ -240,10 +243,10 @@ class VisionNode(Node):
                 # YOLO 미발견 → 백그라운드에서 timeout 초 폴링 후 이미지 중앙 픽
                 self.get_logger().info(
                     f'[FROM_SCAN] YOLO 미발견 → '
-                    f'{self._voice_not_found_timeout}s 대기')
+                    f'{self._scan_yolo_timeout}s 대기 (센터링 완료 상태)')
                 threading.Thread(
                     target=self._wait_for_yolo_then_pick,
-                    args=(label, self._voice_not_found_timeout),
+                    args=(label, self._scan_yolo_timeout),
                     daemon=True,
                 ).start()
                 return
@@ -308,6 +311,7 @@ class VisionNode(Node):
         # 최종 YOLO 결과 확인
         with self._detect_lock:
             detected_names = {d['name'] for d in self._detections}
+            current_dets   = list(self._detections)
 
         found     = [t for t in targets if t in detected_names]
         not_found = [t for t in targets if t not in detected_names]
@@ -321,9 +325,19 @@ class VisionNode(Node):
             self.get_logger().warn(
                 f'[VOICE] 최종 미발견: {not_found}  발견: {found}')
             self._publish_object_not_found(found, not_found)
-        else:
+
+        if found:
+            # 타임아웃 후 화면에 나타난 물체 → 즉시 픽업 트리거
+            # (로봇이 HOME으로 돌아오면서 카메라 시야가 확보되어 뒤늦게 발견되는 케이스)
             self.get_logger().info(
-                f'[VOICE] 최종 확인 — 모두 화면에 존재: {found}')
+                f'[VOICE] 타임아웃 후 발견: {found} → 즉시 픽업 트리거')
+            for label in found:
+                det_info = next(
+                    (d for d in current_dets if d['name'] == label), None)
+                if det_info is not None:
+                    self._auto_select_from_scan(
+                        label, det_info['box'],
+                        float(det_info.get('conf', 1.0)))
 
     # ── /object_not_found 발행 ────────────────────────────────────────────
 

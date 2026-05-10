@@ -70,6 +70,35 @@ class Config:
 # mask      : 마스크
 # bread     : 빵
 
+# 음식/음료 카테고리 (hungry intent에서 VLM 씬 필터링에 사용)
+FOOD_OBJECTS = ['apple', 'banana', 'bread', 'juice', 'candy', 'water']
+
+# 음식 영문키 → 한국어 (TTS용)
+FOOD_NAMES_KR = {
+    'apple' : '사과',
+    'banana': '바나나',
+    'bread' : '빵',
+    'juice' : '주스',
+    'candy' : '사탕',
+    'water' : '물',
+}
+
+# 전체 객체 영문키 → 한국어 (TTS용)
+OBJECT_NAMES_KR = {
+    'umbrella' : '우산',
+    'bag'      : '가방',
+    'apple'    : '사과',
+    'banana'   : '바나나',
+    'pill'     : '영양제',
+    'phone'    : '핸드폰',
+    'juice'    : '주스',
+    'sun_cream': '썬크림',
+    'water'    : '물',
+    'candy'    : '사탕',
+    'mask'     : '마스크',
+    'bread'    : '빵',
+}
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # GPT 시스템 프롬프트
@@ -96,6 +125,7 @@ SYSTEM_PROMPT = """
     "cancel":         <0~100 정수>,
     "weather_query":  <0~100 정수>,
     "general_query":  <0~100 정수>,
+    "hungry":         <0~100 정수>,
     "unknown":        <0~100 정수>
   },
   "reason_log": ["판단 근거1", "판단 근거2"],
@@ -119,6 +149,7 @@ SYSTEM_PROMPT = """
   cancel        : 현재 동작 취소
   weather_query : 날씨 정보 요청
   general_query : 일반 질문 (지식, 상식, 대화)
+  hungry        : 배고픔 표현 → VLM으로 테이블 음식 확인 후 분기
   unknown       : 해석 불가
 
 ━━━ 판단 기준 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -126,10 +157,12 @@ SYSTEM_PROMPT = """
   "물 줘" / "목말라" / "어지러워" / "힘들어"
     → bring_object, target_objects: ["water"], urgency: high (어지러우면) or normal
 
-▸ 간식 / 음식 요청 — 건강 우선 원칙 적용
-  "배고파" / "많이 배고파" / "뭐 먹고 싶어"
-    → bring_object, target_objects: ["bread", "juice"] (포만감 우선, 복수 제공)
-    → urgency: low
+▸ 배고픔 표현 — VLM 씬 확인 후 분기 (hungry intent)
+  "배고파" / "많이 배고파" / "뭐 먹을 거 없나" / "배가 고파" / "허기져"
+    → hungry, target_objects: [], urgency: low
+    ★ bring_object가 아닌 hungry로 분류할 것.
+      시스템이 VLM으로 테이블 음식 여부를 확인한 뒤 직접 분기 처리함.
+      response_message: "잠깐만요, 테이블을 확인해볼게요!"
 
   "달콤한 거 먹고 싶어" / "단 거 줘" / "뭔가 달달한 거"
     → bring_object, target_objects: ["banana"]

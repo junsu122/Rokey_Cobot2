@@ -49,13 +49,15 @@ REASONING_PROMPT = """
 분석 항목:
 1. 가장 가능성 높은 intent는 무엇인가?
    (bring_object / going_out / take_medicine / emergency /
-    cancel / weather_query / general_query / unknown)
+    cancel / weather_query / general_query / hungry / unknown)
+   ★ 배고픔 표현("배고파", "배가 고파", "허기져", "뭐 먹을 거 없나") → hungry
+      (bring_object가 아님. 시스템이 VLM으로 테이블을 확인 후 음식 여부로 분기함)
 2. 목표 물체(target_objects)는 무엇인가? 복수일 수 있음.
    (umbrella / bag / apple / banana / pill / phone /
     juice / sun_cream / water / candy / mask / bread / null)
    건강 우선 원칙:
    - 단 것 요청("달콤한 거", "단 거") → candy 대신 banana 선택
-   - 배고프다 표현("배고파", "많이 배고파") → bread + juice 복수 제공
+   - hungry intent 시 target_objects는 [] (빈 리스트) — 시스템이 자동 결정
 3. 긴급도(urgency)는? (high / normal / low)
 4. 멀티모달 입력 충돌이 있는가? 있다면 어떻게 해결하는가?
 5. 신뢰도(confidence)는 얼마인가? (0.0~1.0)

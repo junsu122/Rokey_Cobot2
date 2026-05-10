@@ -24,7 +24,7 @@ import queue
 import threading
 import time
 from datetime import datetime
-from jarvis_voice_pkg.config import Config
+from jarvis_voice_pkg.config import Config, OBJECT_NAMES_KR
 
 # ── ROS2 (선택적) ─────────────────────────────────────────────────────────────
 try:
@@ -46,6 +46,16 @@ SCAN_TIMEOUT_SEC = 60.0
 
 def get_timestamp() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+
+
+def _josa_eul_reul(word: str) -> str:
+    """받침 있으면 '을', 없으면 '를'"""
+    if not word:
+        return "을"
+    last = word[-1]
+    if '가' <= last <= '힣':
+        return "을" if (ord(last) - 0xAC00) % 28 > 0 else "를"
+    return "을"
 
 
 class DualOutputPublisher:
@@ -211,8 +221,11 @@ class DualOutputPublisher:
                 items = ", ".join(not_found)
 
                 # TTS 안내
+                not_found_kr = [OBJECT_NAMES_KR.get(o, o) for o in not_found]
+                items_kr = ", ".join(not_found_kr)
+                josa = _josa_eul_reul(not_found_kr[-1] if not_found_kr else "")
                 self._say(
-                    f"{items}을 찾을 수 없어요. "
+                    f"{items_kr}{josa} 찾을 수 없어요. "
                     f"작업 공간을 탐색할게요. "
                     f"취소하려면 말씀해 주세요."
                 )
@@ -260,8 +273,10 @@ class DualOutputPublisher:
                 voice_intent_sent  = data.get("voice_intent_sent", False)
                 print(f"  ✅ found       : {found_labels}")
 
+                found_kr = [OBJECT_NAMES_KR.get(l, l) for l in found_labels]
+                josa = _josa_eul_reul(found_kr[-1] if found_kr else "")
                 self._say(
-                    f"{', '.join(found_labels)}을 찾았어요! 가져다 드릴게요.")
+                    f"{', '.join(found_kr)}{josa} 찾았어요! 가져다 드릴게요.")
 
                 # 스캔 트리거 픽이 완료될 때까지 is_scanning=True 유지
                 self._scan_pick_pending = True
@@ -282,11 +297,13 @@ class DualOutputPublisher:
                         print(f"  📡 /voice_intent 재발행: {obj['label']}")
 
             else:
-                items = ", ".join(target_objects)
+                target_kr = [OBJECT_NAMES_KR.get(o, o) for o in target_objects]
+                items_kr  = ", ".join(target_kr)
+                josa = _josa_eul_reul(target_kr[-1] if target_kr else "")
                 print(f"  ❌ not found   : {target_objects}")
                 self._say(
                     f"작업 공간을 전부 탐색했지만 "
-                    f"{items}을 찾을 수 없었어요.")
+                    f"{items_kr}{josa} 찾을 수 없었어요.")
 
             print(f"{'═'*56}")
 

@@ -146,6 +146,7 @@ class WorkspaceScanNode(Node):
         self.declare_parameter("vel",                       DEFAULT_VEL)
         self.declare_parameter("acc",                       DEFAULT_ACC)
         self.declare_parameter("capture_wait_sec",          DEFAULT_CAPTURE_WAIT_SEC)
+        self.declare_parameter("centering_wait_sec",        0.3)   # 센터링 후 안정화 대기(초)
         self.declare_parameter("detection_window_sec",      DEFAULT_DETECTION_WINDOW_SEC)
         self.declare_parameter("log_file_path",             DEFAULT_LOG_FILE_PATH)
         self.declare_parameter("pose_distance_threshold",   DEFAULT_POSE_DISTANCE_THRESHOLD)
@@ -158,6 +159,7 @@ class WorkspaceScanNode(Node):
         self.vel                      = float(self.get_parameter("vel").value)
         self.acc                      = float(self.get_parameter("acc").value)
         self.capture_wait_sec         = float(self.get_parameter("capture_wait_sec").value)
+        self.centering_wait_sec       = float(self.get_parameter("centering_wait_sec").value)
         self.detection_window_sec     = float(self.get_parameter("detection_window_sec").value)
         self.log_file_path            = str(self.get_parameter("log_file_path").value)
         self.pose_distance_threshold  = float(self.get_parameter("pose_distance_threshold").value)
@@ -785,6 +787,12 @@ class WorkspaceScanNode(Node):
                     self.get_logger().info(
                         f"✅ 모든 타겟 발견 [{index}/{total}] "
                         f"→ 즉시 센터링 후 vision_node 직접 트리거")
+                    # /scan_result를 먼저 발행 → orchestrator가 _next_pick_from_scan=True 세팅
+                    # 이후 /voice_intent → /selected_object 도착 전에 플래그가 준비됨 (레이스 컨디션 방지)
+                    self._publish_scan_result(
+                        list(found_objects_map.values()),
+                        cancelled=False, voice_intent_sent=True)
+                    time.sleep(0.05)  # DDS 전달 여유
                     for name, obj in list(found_objects_map.items()):
                         if self.cancel_requested:
                             cancelled = True
@@ -800,7 +808,7 @@ class WorkspaceScanNode(Node):
                                 f' → ({centered[0]:.1f},{centered[1]:.1f})')
                             movel(centered, vel=self.vel, acc=self.acc,
                                   mod=move_mod_abs)
-                            wait(self.capture_wait_sec)
+                            wait(self.centering_wait_sec)
                             obj['best_pose'] = centered
                         else:
                             self.get_logger().warn(
@@ -832,7 +840,7 @@ class WorkspaceScanNode(Node):
                     f'({prev_xy[0]:.1f},{prev_xy[1]:.1f}) → '
                     f'({centered[0]:.1f},{centered[1]:.1f})')
                 movel(centered, vel=self.vel, acc=self.acc, mod=move_mod_abs)
-                wait(self.capture_wait_sec)
+                wait(self.centering_wait_sec)
 
                 # 센터링 위치에서 VLM 재확인
                 recheck   = self._collect_detections_at_pose()
@@ -857,8 +865,9 @@ class WorkspaceScanNode(Node):
             f"스캔 {'취소' if cancelled else '완료'} — "
             f"발견: {[o['name'] for o in found_list]}")
 
-        self._publish_scan_result(found_list, cancelled=cancelled,
-                                  voice_intent_sent=direct_pick_triggered)
+        if not direct_pick_triggered:
+            self._publish_scan_result(found_list, cancelled=cancelled,
+                                      voice_intent_sent=False)
 
         if self.scan_records:
             summary = self.build_final_summary(self.scan_records)

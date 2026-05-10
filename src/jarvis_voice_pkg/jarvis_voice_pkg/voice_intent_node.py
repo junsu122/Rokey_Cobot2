@@ -35,7 +35,7 @@ from cv_bridge import CvBridge
 from rclpy.executors import MultiThreadedExecutor
 from sensor_msgs.msg import Image
 
-from jarvis_voice_pkg.config        import Config
+from jarvis_voice_pkg.config        import Config, FOOD_OBJECTS, FOOD_NAMES_KR
 from jarvis_voice_pkg.stt           import LocalWhisperSTT
 from jarvis_voice_pkg.recorder      import AudioRecorder
 from jarvis_voice_pkg.intent_engine import IntentEngine
@@ -508,6 +508,49 @@ class JARVISVoiceNode:
                 result["response_message"] = answer
                 print(f"💡 [GPT 답변] {answer}")
 
+            elif intent == "hungry":
+                print("🍽️  [hungry] VLM 씬에서 음식 확인 중...")
+                available_food = [f for f in FOOD_OBJECTS
+                                  if f in self.detected_objects]
+                print(f"🍽️  [hungry] 테이블 음식: {available_food or '없음'}")
+
+                if available_food:
+                    # 테이블에 음식 있음 → bring_object로 전환
+                    food_key = available_food[0]
+                    food_kr  = FOOD_NAMES_KR.get(food_key, food_key)
+                    # 받침 유무에 따라 조사 선택: (유니코드 - 44032) % 28 > 0 → 받침 있음 → '이'
+                    josa = '이' if (ord(food_kr[-1]) - 44032) % 28 > 0 else '가'
+                    result["intent"]          = "bring_object"
+                    result["target_objects"]  = [food_key]
+                    result["target_object"]   = food_key
+                    result["confidence"]      = 1.0   # 시스템 결정이므로 신뢰도 체크 패스
+                    result["response_message"] = (
+                        f"테이블에 {food_kr}{josa} 있네요! 가져다드릴게요.")
+                    intent = "bring_object"  # 이후 STEP 6 분기에도 반영
+                    print(f"🍎 [hungry → bring_object] {food_key}")
+                else:
+                    # 테이블에 음식 없음 → 작업공간 전체 스캔으로 음식 탐색
+                    print("🔍 [hungry] 음식 없음 → 작업공간 스캔 시작")
+                    tts_msg = "테이블에 음식이 없어요. 다른 곳에서 찾아볼게요!"
+                    self.publisher._say(tts_msg)
+                    # 스캔 상태 진입
+                    self.publisher.is_scanning    = True
+                    self.publisher.scan_result    = None
+                    self.publisher.scan_cancelled = False
+                    self.publisher._scan_event.clear()
+                    # 음식 카테고리 전체 대상으로 스캔 요청
+                    self.publisher._pub(
+                        self.publisher._scan_request_pub,
+                        self.publisher._with_timestamp({
+                            "action"        : "start",
+                            "target_objects": FOOD_OBJECTS,
+                            "reason"        : "hungry_scan",
+                        })
+                    )
+                    print(f"🔍 [SCAN REQUEST] 음식 탐색 대상: {FOOD_OBJECTS}")
+                    self.current_action = "hungry"
+                    return result  # publish_all 스킵 (TTS는 이미 발행)
+
             # ── STEP 5: 신뢰도 체크 ──────────────────────────────────────
             if result.get("confidence", 0) < Config.CONFIDENCE_MIN:
                 print("⚠️  신뢰도 낮음 — 재확인 요청")
@@ -606,14 +649,16 @@ class JARVISVoiceNode:
     def run_test(self):
         """텍스트 테스트 모드"""
         scenarios = [
-            ("어지러워",                ["water"],             None,            None,     "긴급 - 물 요청"),
-            ("도와줘",                  [],                    None,            None,     "긴급 - 응급"),
-            ("약 줘",                   ["pill", "water"],     None,            None,     "약 복용 보조"),
-            ("나갈 준비 도와줘",         ["bag", "phone"],      None,            None,     "외출 준비"),
-            ("아니야",                  ["water"],             "bring_object",  "reject", "Replanning"),
-            ("사과 줘",                 ["apple", "banana"],   None,            None,     "음식 요청"),
-            ("오늘 날씨 어때?",          [],                    None,            None,     "날씨 조회"),
-            ("아인슈타인이 누구야?",     [],                    None,            None,     "일반 질문"),
+            ("어지러워",                ["water"],                     None,            None,     "긴급 - 물 요청"),
+            ("도와줘",                  [],                            None,            None,     "긴급 - 응급"),
+            ("약 줘",                   ["pill", "water"],             None,            None,     "약 복용 보조"),
+            ("나갈 준비 도와줘",         ["bag", "phone"],              None,            None,     "외출 준비"),
+            ("아니야",                  ["water"],                     "bring_object",  "reject", "Replanning"),
+            ("사과 줘",                 ["apple", "banana"],           None,            None,     "음식 요청"),
+            ("배고파",                  ["apple", "umbrella"],         None,            None,     "hungry — 테이블에 사과 있음"),
+            ("배고파",                  ["umbrella", "phone", "pill"], None,            None,     "hungry — 음식 없어 스캔"),
+            ("오늘 날씨 어때?",          [],                            None,            None,     "날씨 조회"),
+            ("아인슈타인이 누구야?",     [],                            None,            None,     "일반 질문"),
         ]
 
         print(f"\n🧪 JARVIS 테스트 모드 — {len(scenarios)}개 시나리오\n")
