@@ -35,6 +35,8 @@ import rclpy
 from rclpy.node import Node
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.callback_groups import ReentrantCallbackGroup
+from sensor_msgs.msg import Image
+from cv_bridge import CvBridge
 from std_msgs.msg import Bool
 from dsr_msgs2.srv import MoveLine
 from dsr_msgs2.msg import RobotState
@@ -114,6 +116,9 @@ class WebcamTeleopNode(Node):
 
         # ── 퍼블리셔 ──────────────────────────────────
         self._pub_gesture = self.create_publisher(GestureEvent, '/gesture_event', 10)
+        self._pub_frame   = self.create_publisher(Image, '/webcam/image_raw', 1)
+        self._cv_bridge   = CvBridge()
+        self._frame_count = 0
 
         # ── 구독 ─────────────────────────────────────
         self._cb_group = ReentrantCallbackGroup()
@@ -324,6 +329,13 @@ class WebcamTeleopNode(Node):
                                             fist, pointing)
 
                 self._draw_ui(frame, avg_x, avg_y, hand_visible)
+
+                # 5프레임마다 웹캠 영상 발행 (JARVIS 두리번 감지용)
+                self._frame_count += 1
+                if self._frame_count % 5 == 0:
+                    self._pub_frame.publish(
+                        self._cv_bridge.cv2_to_imgmsg(frame, 'bgr8'))
+
                 cv2.imshow('Gesture Teleop', frame)
 
                 key = cv2.waitKey(1) & 0xFF

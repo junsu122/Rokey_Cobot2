@@ -20,21 +20,30 @@ TUI:
     노드 종료 시 TUI 프로세스도 자동 종료
 """
 
+import json
 import os
 import sys
 import time
+import base64
 import threading
 import traceback
 import subprocess
 
+import cv2
+import numpy as np
+from cv_bridge import CvBridge
 from rclpy.executors import MultiThreadedExecutor
+from sensor_msgs.msg import Image
 
 from jarvis_voice_pkg.config        import Config
 from jarvis_voice_pkg.stt           import LocalWhisperSTT
 from jarvis_voice_pkg.recorder      import AudioRecorder
 from jarvis_voice_pkg.intent_engine import IntentEngine
 from jarvis_voice_pkg.publisher     import DualOutputPublisher, log_stt, log_intent
-from jarvis_voice_pkg.weather       import get_weather
+from jarvis_voice_pkg.weather       import get_weather, get_weather_detail
+
+SEARCH_CHECK_SEC    = 5.0   # 두리번 감지 주기
+SEARCH_COOLDOWN_SEC = 20.0  # 감지 후 재감지 억제 시간
 
 # 취소로 판단할 키워드
 CANCEL_KEYWORDS = ["취소", "아니야", "됐어", "멈춰", "그만", "중단", "싫어"]
@@ -144,7 +153,151 @@ class JARVISVoiceNode:
         # ── 스캔 중 취소 감지 플래그 ──────────────────────────────────────
         self._cancel_detected : bool = False
 
+        # ── 웹캠 프레임 (두리번 감지용 — 사용자 방향) ────────────────────
+        self._latest_frame     : np.ndarray | None = None
+        self._frame_lock       = threading.Lock()
+        self._cv_bridge        = CvBridge()
+        self._search_next_time : float = 0.0
+
+        # ── 테이블 카메라 프레임 (VLM 외출 준비용 — 테이블 방향) ──────────
+        self._latest_table_frame : np.ndarray | None = None
+        self._table_frame_lock   = threading.Lock()
+
+        if self.publisher._node:
+            self.publisher._node.create_subscription(
+                Image, '/webcam/image_raw',
+                self._webcam_cb, 1)
+            self.publisher._node.create_subscription(
+                Image, '/camera/camera/color/image_raw',
+                self._table_cam_cb, 1)
+
+        threading.Thread(target=self._searching_detector, daemon=True).start()
+
         print("✅ 초기화 완료\n")
+
+    # ── 웹캠 콜백 (사용자 방향 — 두리번거림 감지용) ──────────────────────────
+
+    def _webcam_cb(self, msg: Image):
+        try:
+            frame = self._cv_bridge.imgmsg_to_cv2(msg, 'bgr8')
+            with self._frame_lock:
+                self._latest_frame = frame
+        except Exception as e:
+            print(f"⚠️  [웹캠 콜백] {e}")
+
+    # ── 테이블 카메라 콜백 (로봇 RealSense — 테이블 물건 VLM용) ─────────────
+
+    def _table_cam_cb(self, msg: Image):
+        try:
+            frame = self._cv_bridge.imgmsg_to_cv2(msg, 'bgr8')
+            with self._table_frame_lock:
+                self._latest_table_frame = frame
+        except Exception as e:
+            print(f"⚠️  [테이블 카메라 콜백] {e}")
+
+    def _get_table_image_b64(self) -> str | None:
+        """로봇 RealSense(테이블 방향) 최신 프레임을 JPEG base64로 변환"""
+        with self._table_frame_lock:
+            frame = self._latest_table_frame.copy() \
+                if self._latest_table_frame is not None else None
+        if frame is None:
+            return None
+        _, buf = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
+        return base64.b64encode(buf.tobytes()).decode()
+
+    def _scan_scene_with_vlm(self) -> list[str]:
+        """
+        음성 명령 직전 테이블 씬을 VLM(GPT-4o Vision)으로 1회 파악.
+        detected_objects 갱신용 — 호출 비용 최소화를 위해 음성 입력 시에만 실행.
+        """
+        import openai
+        image_b64 = self._get_table_image_b64()
+        if image_b64 is None:
+            return []
+
+        detectable = (
+            'umbrella, bag, apple, banana, pill, phone, '
+            'juice, sun_cream, water, candy, mask, bread'
+        )
+        try:
+            client = openai.OpenAI(api_key=os.environ.get('OPENAI_API_KEY', ''))
+            resp = client.chat.completions.create(
+                model='gpt-4o',
+                messages=[{
+                    'role': 'user',
+                    'content': [
+                        {'type': 'image_url',
+                         'image_url': {'url': f'data:image/jpeg;base64,{image_b64}'}},
+                        {'type': 'text', 'text': (
+                            f'테이블 위에 있는 물건을 아래 목록에서 찾아 JSON으로만 답변.\n'
+                            f'목록: {detectable}\n'
+                            f'{{"objects": ["영문키1", "영문키2"]}} — 없으면 {{"objects": []}}'
+                        )},
+                    ],
+                }],
+                max_tokens=80,
+                response_format={'type': 'json_object'},
+            )
+            objects = json.loads(resp.choices[0].message.content).get('objects', [])
+            print(f"👁️  [VLM 씬 파악] {objects}")
+            return objects
+        except Exception as e:
+            print(f"⚠️  [VLM 씬 파악 오류] {e}")
+            return []
+
+    # ── 두리번거리는 감지 (백그라운드 스레드) ────────────────────────────────
+
+    def _searching_detector(self):
+        """5초마다 웹캠 프레임을 GPT-4o로 분석 — 두리번거리면 TTS로 알림"""
+        print("👀 [두리번 감지] 백그라운드 스레드 시작")
+        while True:
+            time.sleep(SEARCH_CHECK_SEC)
+
+            if time.time() < self._search_next_time:
+                continue
+            if self.publisher.is_scanning:
+                continue
+
+            with self._frame_lock:
+                frame = self._latest_frame.copy() \
+                    if self._latest_frame is not None else None
+            if frame is None:
+                continue
+
+            try:
+                _, buf = cv2.imencode('.jpg', frame,
+                                      [cv2.IMWRITE_JPEG_QUALITY, 75])
+                b64 = base64.b64encode(buf.tobytes()).decode()
+
+                import openai, os
+                client = openai.OpenAI(api_key=os.environ.get('OPENAI_API_KEY', ''))
+                resp = client.chat.completions.create(
+                    model='gpt-4o',
+                    messages=[{
+                        'role': 'user',
+                        'content': [
+                            {'type': 'image_url',
+                             'image_url': {'url': f'data:image/jpeg;base64,{b64}'}},
+                            {'type': 'text', 'text': (
+                                '이미지 속 사람이 무언가를 찾는 듯 두리번거리거나 '
+                                '주변을 살피고 있나요? '
+                                'JSON으로만 답변: '
+                                '{"is_searching": true or false, "reason": "한 줄"}'
+                            )},
+                        ],
+                    }],
+                    max_tokens=80,
+                    response_format={'type': 'json_object'},
+                )
+                import json
+                data = json.loads(resp.choices[0].message.content)
+                if data.get('is_searching'):
+                    print(f"👀 [두리번 감지] {data.get('reason')}")
+                    self.publisher._say('뭔가 찾으시나요? 말씀해 주세요!')
+                    self._search_next_time = time.time() + SEARCH_COOLDOWN_SEC
+
+            except Exception as e:
+                print(f"⚠️  [두리번 감지 오류] {e}")
 
     # ── 추론 모드 선택 ────────────────────────────────────────────────────────
 
@@ -152,12 +305,98 @@ class JARVISVoiceNode:
         """긴급 키워드 포함 여부 확인"""
         return any(kw in voice_text for kw in EMERGENCY_KEYWORDS)
 
+    def _get_image_b64(self) -> str | None:
+        """현재 웹캠 프레임을 base64로 변환"""
+        with self._frame_lock:
+            frame = self._latest_frame.copy() \
+                if self._latest_frame is not None else None
+        if frame is None:
+            return None
+        _, buf = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
+        return base64.b64encode(buf.tobytes()).decode()
+
+    # ── 외출 짐 계획 (o4-mini + 날씨 + 씬) ──────────────────────────────────
+
+    def _plan_going_out_items(self) -> tuple[list[str], str]:
+        """
+        o4-mini로 날씨 + 현재 씬(카메라+감지 물건) 기반 외출 짐 계획 수립
+
+        Returns:
+            (items, tts_message)
+            items: ["bag", "umbrella", ...] 순서 포함
+        """
+        import json, openai
+
+        weather = get_weather_detail()
+
+        weather_ctx = (
+            f"기온: {weather.get('temp', '?')}°C, "
+            f"날씨: {weather.get('desc', '?')}, "
+            f"UV지수: {weather.get('uv', '?')}({weather.get('uv_level', '?')}), "
+            f"미세먼지PM10: {weather.get('pm10', '?')}({weather.get('pm_level', '?')}), "
+            f"비예보: {'있음' if weather.get('need_umbrella') else '없음'}, "
+            f"자외선강함: {'예' if weather.get('need_sunscreen') else '아니오'}, "
+            f"미세먼지나쁨: {'예' if weather.get('need_mask') else '아니오'}, "
+            f"추운날씨: {'예' if weather.get('cold') else '아니오'}"
+        )
+
+        # 테이블 카메라(RealSense) 이미지로 VLM 입력 — 웹캠(사용자 방향) 아님
+        image_b64 = self._get_table_image_b64()
+        scene_ctx = (
+            f"현재 작업 테이블 위 YOLO 감지 물건: "
+            f"{self.detected_objects if self.detected_objects else '없음'}"
+        )
+
+        prompt = (
+            f"시니어 보조 협동로봇 JARVIS입니다. 외출 준비를 도와야 합니다.\n\n"
+            f"[날씨 정보]\n{weather_ctx}\n\n"
+            f"[작업 테이블 현황]\n{scene_ctx}\n"
+            f"{'(테이블 카메라 이미지 첨부 — 실제 테이블 위 물건 직접 확인)' if image_b64 else ''}\n\n"
+            f"로봇이 가져올 수 있는 물건: bag(가방), umbrella(우산), sun_cream(썬크림), water(물)\n"
+            f"bag은 반드시 포함. 날씨와 테이블 위 실제 물건 현황을 함께 고려해 나머지 추가 여부를 판단해줘.\n\n"
+            f"JSON으로만 답변:\n"
+            f'{{\"items\": [\"bag\", ...], \"reason\": \"판단 근거 한 줄\", '
+            f'\"tts\": \"사용자에게 전달할 자연스러운 한국어 메시지\"}}'
+        )
+
+        content: list | str = prompt
+        if image_b64:
+            content = [
+                {"type": "image_url",
+                 "image_url": {"url": f"data:image/jpeg;base64,{image_b64}"}},
+                {"type": "text", "text": prompt},
+            ]
+
+        try:
+            client = openai.OpenAI(api_key=os.environ.get("OPENAI_API_KEY", ""))
+            resp = client.chat.completions.create(
+                model="o4-mini",
+                messages=[{"role": "user", "content": content}],
+                max_tokens=300,
+            )
+            raw = resp.choices[0].message.content
+            s = raw.find("{")
+            e = raw.rfind("}") + 1
+            data = json.loads(raw[s:e]) if s != -1 and e > s else {}
+
+            items  = data.get("items",  ["bag"])
+            tts    = data.get("tts",    "외출 준비물을 챙겨드릴게요!")
+            reason = data.get("reason", "")
+            print(f"🧳 [외출 짐 계획] items={items}  이유: {reason}")
+            return items, tts
+
+        except Exception as e:
+            print(f"⚠️  [외출 짐 계획 오류] {e}")
+            return ["bag"], "외출 가방을 가져다드릴게요!"
+
     def _analyze(self, voice_text: str) -> dict:
         """
         상황에 따라 추론 모드 선택
         - 긴급 키워드 → analyze_fast() (단일 호출, 빠른 응답)
-        - 일반 상황   → analyze()     (3단계 CoT, 정확한 추론)
+        - 일반 상황   → analyze()     (3단계 CoT + VLM, 정확한 추론)
         """
+        image_b64 = self._get_image_b64()
+
         if self._is_emergency(voice_text):
             print("🚨 [긴급 감지] 빠른 추론 모드 실행...")
             return self.engine.analyze_fast(
@@ -165,6 +404,7 @@ class JARVISVoiceNode:
                 detected_objects=self.detected_objects,
                 current_action=self.current_action,
                 gesture=self.gesture,
+                image_b64=image_b64,
             )
         else:
             print("🧠 [3단계 CoT 추론 시작...]")
@@ -173,6 +413,7 @@ class JARVISVoiceNode:
                 detected_objects=self.detected_objects,
                 current_action=self.current_action,
                 gesture=self.gesture,
+                image_b64=image_b64,
             )
 
     # ── 스캔 대기 모드 ────────────────────────────────────────────────────────
@@ -237,7 +478,11 @@ class JARVISVoiceNode:
                     return None
                 log_stt(voice_text, logprob)
 
-            # ── STEP 2: 추론 (긴급/일반 분기) ─────────────────────────────
+            # ── STEP 2: 씬 파악 (VLM 1회 호출) ──────────────────────────
+            print("👁️  [VLM 씬 파악 중...]")
+            self.detected_objects = self._scan_scene_with_vlm()
+
+            # ── STEP 3: 추론 (긴급/일반 분기) ─────────────────────────────
             result = self._analyze(voice_text)
 
             # ── STEP 3: 콘솔 상세 출력 ───────────────────────────────────
@@ -249,6 +494,13 @@ class JARVISVoiceNode:
             if intent == "weather_query":
                 print("🌤️  [날씨 API 호출 중...]")
                 result["response_message"] = get_weather()
+
+            elif intent == "going_out":
+                print("🚪 [외출 준비 — o4-mini 날씨+씬 기반 짐 계획 중...]")
+                items, tts = self._plan_going_out_items()
+                result["target_objects"]   = items
+                result["target_object"]    = items[0] if items else None
+                result["response_message"] = tts
 
             elif intent == "general_query":
                 print("💬 [일반 질문 — GPT 답변 생성 중...]")
@@ -263,10 +515,23 @@ class JARVISVoiceNode:
                     "죄송합니다, 잘 못 들었어요. 다시 말씀해 주세요."
                 )
 
-            # ── STEP 6: ROS2 & 콘솔 동시 발행 ────────────────────────────
+            # ── STEP 6: 발행 순서 최적화 (감지된 물건 먼저, 없는 물건 나중) ──
+            if intent in ("bring_object", "going_out", "take_medicine"):
+                objs = result.get("target_objects") or []
+                if len(objs) > 1:
+                    visible  = [o for o in objs if o in self.detected_objects]
+                    missing  = [o for o in objs if o not in self.detected_objects]
+                    reordered = visible + missing
+                    if reordered != objs:
+                        print(f"🔀 [픽 순서 재정렬] {objs} → {reordered}  "
+                              f"(감지={visible}, 미감지={missing})")
+                        result["target_objects"] = reordered
+                        result["target_object"]  = reordered[0] if reordered else None
+
+            # ── STEP 7: ROS2 & 콘솔 동시 발행 ────────────────────────────
             self.publisher.publish_all(voice_text, result)
 
-            # ── STEP 7: 상태 업데이트 ────────────────────────────────────
+            # ── STEP 8: 상태 업데이트 ────────────────────────────────────
             if intent == "cancel":
                 print("🔄 Replanning: current_action 초기화")
                 self.current_action = None
@@ -301,6 +566,30 @@ class JARVISVoiceNode:
                             self._wait_for_scan_with_cancel()
                             break
                         if not self.publisher.is_scanning:
+                            break
+
+                    continue
+
+                # ── 픽/큐 진행 중이면 취소 명령만 허용 ──────────────────
+                if self.publisher.is_robot_busy():
+                    print("\n⏳ [로봇 작업 중] 취소 명령만 말씀해 주세요...")
+
+                    while self.publisher.is_robot_busy():
+                        cancelled = self._listen_for_cancel()
+                        if cancelled:
+                            # 큐에 남은 작업 모두 제거
+                            cleared = 0
+                            while not self.publisher._pick_queue.empty():
+                                try:
+                                    self.publisher._pick_queue.get_nowait()
+                                    cleared += 1
+                                except Exception:
+                                    break
+                            print(f"🛑 [큐 초기화] 대기 작업 {cleared}개 취소")
+                            self.publisher._say(
+                                "알겠어요. 현재 작업이 끝나는 대로 멈출게요.")
+                            break
+                        if not self.publisher.is_robot_busy():
                             break
 
                     continue

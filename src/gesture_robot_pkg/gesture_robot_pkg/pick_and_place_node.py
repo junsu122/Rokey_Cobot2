@@ -67,7 +67,6 @@ from gesture_robot_pkg.constants import (
     REALSENSE_DEPTH_TOPIC, REALSENSE_INFO_TOPIC,
     PICK_VEL, PICK_ACC,
     PICK_MIN_DEPTH_MM, PICK_MAX_DEPTH_MM, DEPTH_SAMPLE_MARGIN,
-    PICK_DEPTH_OFFSET,
     APPROACH_MIN_MM, APPROACH_MAX_MM,
     LIFT_MIN_MM, LIFT_MAX_MM,
     PICK_EXTRA_DESCENT_MM,
@@ -89,12 +88,13 @@ class PickAndPlaceNode(Node):
         self._bridge   = CvBridge()
 
         self.angle_sub = self.create_subscription(
-            Float32, 
-            '/object_angle', 
-            self._angle_cb, 
+            Float32,
+            '/object_angle',
+            self._angle_cb,
             10,
             callback_group=self._cb_group)
-        self._spin_angle = 180.0 # 수신된 각도를 저장할 변수  ####################각도 변환 준수가 쓰는 변수####################3
+        self._spin_angle = 0.0
+        self._angle_event = threading.Event()  # SPIN_CHUCK 전 각도 수신 대기용
 
         self.depth_info_pub = self.create_publisher(Float32MultiArray, '/object_depth_data', 10) ####################각도 변환 준수가 쓰는 데이터####################3
 
@@ -226,9 +226,8 @@ class PickAndPlaceNode(Node):
             self._tcp_received.set()
 
     def _angle_cb(self, msg: Float32):
-        """ /object_angle 토픽 수신 시 호출되는 콜백 """
         self._spin_angle = float(msg.data)
-        # [로그 추가] 수신된 각도를 소수점 첫째자리까지 출력
+        self._angle_event.set()
         self.get_logger().info(f'[TOPIC] Received object_angle: {self._spin_angle:.1f}°')
 
     # ── 액션 콜백 ─────────────────────────────────────────────────────────
@@ -267,6 +266,12 @@ class PickAndPlaceNode(Node):
             return result
 
     async def _execute_inner(self, goal_handle, goal, result):
+
+        # 픽 시작 시 각도 이벤트 초기화 (이전 픽의 각도 재사용 방지)
+        self._angle_event.clear()
+        self._spin_angle = 0.0
+
+        from_scan = bool(goal.from_scan)
 
         # ── TCP 획득: GetCurrentPosx 서비스 우선, 상태 토픽 fallback ──────
         # dsr_hw_interface2 드라이버가 /dsr01/state 토픽을 발행하지 않는 경우가 있어
@@ -323,7 +328,13 @@ class PickAndPlaceNode(Node):
         await self._ensure_autonomous_mode()
 
         # ── 깊이 기반 3D 위치 추정 ───────────────────────────────────────
+        # from_scan=True: vision_node가 YOLO bbox 또는 이미지 중앙 bbox를 제공.
+        # 센터링으로 로봇이 이미 물체 위에 있으므로 goal.box를 그대로 사용.
+        if from_scan:
+            self.get_logger().info(
+                f'[FROM_SCAN] YOLO bbox 기반 depth 추정  box={list(goal.box)}')
         pos_result = self._get_3d_position(list(goal.box))
+
         if pos_result is None:
             result.success = False
             result.message = 'Depth estimation failed'
@@ -453,19 +464,35 @@ class PickAndPlaceNode(Node):
             f'[WORKSPACE] descend_z={descend_z_target:.1f}mm  OK')
 
         # ── 시퀀스 실행 ──────────────────────────────────────────────────
-        stages = [
-            ('HOME',         self._stage_home),
-            ('APPROACH',     self._stage_approach,     pick_target, approach_h),
-            ('OPEN_GRIPPER', self._stage_open_gripper),
-            ('SPIN_CHUCK',   self._stage_spin_angle,   pick_target, approach_h),
-            ('DESCEND',      self._stage_descend,      pick_target, descent_d),
-            ('GRASP',        self._stage_grasp),
-            ('LIFT',         self._stage_lift,         pick_target, lift_h),
-            ('GIVE',         self._stage_give), ########## 전달해주는 로직 ############
-            ('Back_HOME',    self._stage_back_home), ########## 맨 처음 home으로 가는 로직 ##########
-        ]
+        # from_scan=True: 로봇이 이미 스캔 위치(물체 위)에 있으므로 HOME 스킵
+        if from_scan:
+            self.get_logger().info(
+                '[PICK] from_scan=True → HOME 단계 스킵 (스캔 위치에서 바로 픽)')
+            stages = [
+                ('APPROACH',     self._stage_approach,     pick_target, approach_h),
+                ('OPEN_GRIPPER', self._stage_open_gripper),
+                ('SPIN_CHUCK',   self._stage_spin_angle,   pick_target, approach_h),
+                ('DESCEND',      self._stage_descend,      pick_target, descent_d),
+                ('GRASP',        self._stage_grasp),
+                ('LIFT',         self._stage_lift,         pick_target, lift_h),
+                ('GIVE',         self._stage_give),
+                ('Back_HOME',    self._stage_back_home),
+            ]
+        else:
+            stages = [
+                ('HOME',         self._stage_home),
+                ('APPROACH',     self._stage_approach,     pick_target, approach_h),
+                ('OPEN_GRIPPER', self._stage_open_gripper),
+                ('SPIN_CHUCK',   self._stage_spin_angle,   pick_target, approach_h),
+                ('DESCEND',      self._stage_descend,      pick_target, descent_d),
+                ('GRASP',        self._stage_grasp),
+                ('LIFT',         self._stage_lift,         pick_target, lift_h),
+                ('GIVE',         self._stage_give),
+                ('Back_HOME',    self._stage_back_home),
+            ]
 
-        GRASP_INDEX = 4
+        # GRASP 단계 인덱스: HOME 포함 시 4번째, 스킵 시 3번째
+        GRASP_INDEX = 3 if from_scan else 4
         grasped = False
 
         for i, (stage_name, stage_fn, *fn_args) in enumerate(stages):
@@ -621,6 +648,11 @@ class PickAndPlaceNode(Node):
         이후 DESCEND / LIFT 등 모든 단계가 갱신된 rz를 그대로 유지한다.
         target_rz = 현재 rz + spin_angle(물체 각도 오프셋) + SPIN_ANGLE_OFFSET(프레임 보정)
         """
+        # /object_angle 수신 대기 (최대 2초, 미수신 시 0.0° 사용)
+        got = self._angle_event.wait(timeout=2.0)
+        if not got:
+            self.get_logger().warn('[SPIN_CHUCK] /object_angle 미수신 (2s) — 0.0° 사용')
+
         current_rz = pt[5]
         target_rz  = current_rz + self._spin_angle + SPIN_ANGLE_OFFSET
         pt[5]      = target_rz   # pick_target rz를 갱신 → 이후 모든 단계에 반영
@@ -659,7 +691,7 @@ class PickAndPlaceNode(Node):
         time.sleep(0.5)
 
         await self._movej_async(HOME_JOINT, PICK_VEL, PICK_ACC)
-        time.sleep(0.5)
+        time.sleep(5.0)
 
         if self._gripper is not None:
             try:
@@ -746,7 +778,7 @@ class PickAndPlaceNode(Node):
                 '로봇이 MANUAL 모드면 이동하지 않을 수 있음.')
             return
         req = SetRobotMode.Request()
-        req.robot_mode = 1  # ROBOT_MODE_AUTONOMOUS
+        req.robot_mode = 1  # ROBOT_MODE_AUTONOMOU
         res = await self._set_mode_cli.call_async(req)
         if res is None:
             self.get_logger().warn('[MODE] set_robot_mode 응답 없음')
@@ -898,7 +930,7 @@ class PickAndPlaceNode(Node):
         depth_m       = obj_top_mm * 0.001
         X = (cx - ppx) * depth_m / fx
         Y = (cy - ppy) * depth_m / fy
-        Z = depth_m + PICK_DEPTH_OFFSET * 0.001
+        Z = depth_m
         self.get_logger().info(
         f'[DEPTH] box=[{x1},{y1},{x2},{y2}]  cx={cx} cy={cy}  '
         f'fx={fx:.1f} fy={fy:.1f}')

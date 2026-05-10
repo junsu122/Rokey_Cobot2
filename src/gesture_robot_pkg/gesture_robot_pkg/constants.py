@@ -37,12 +37,11 @@ TOOLCHANGER_PORT = "502"
 # ── Pick & Place 기본값 ───────────────────────────────────────────────
 PICK_VEL            = 200
 PICK_ACC            = 200
-PICK_DEPTH_OFFSET   = 30.0          # mm
 HOME_JOINT          = [0, 0, 90, 0, 90, 0]
 GIVE_JOINT          = [-47.52, -16.55, 101.54, 1.37, 94.23, -47.05]
 GIVE_LINE           = [176.72,-178.17,400.26,12.77,178.44,13.00]
 WAY_POINT_JOINT     = [-8.24, 1.14, 88.66, 1.92, 88.11, -6.78]
-PICK_MIN_DEPTH_MM   = 50.0    # v6 기준값 (D435 최소 유효 거리 고려 시 105 이상 권장)
+PICK_MIN_DEPTH_MM   = 105.0    # v6 기준값 (D435 최소 유효 거리 고려 시 105 이상 권장)
 PICK_MAX_DEPTH_MM   = 1500.0
 DEPTH_SAMPLE_MARGIN = 8
 
@@ -72,7 +71,7 @@ LIFT_MAX_MM     = 200.0
 # → 물체가 얇을수록 절반보다 조금 높은 위치에서 멈춰 테이블 충돌 방지.
 # 그리퍼 손가락이 테이블에 닿는 경우 이 값을 늘려서 튜닝.
 GRIPPER_TABLE_CLEARANCE_MM = 8.0
-PICK_EXTRA_DESCENT_MM      = 30.0  # 기본 하강량에 추가로 더 내려가는 거리(mm)
+PICK_EXTRA_DESCENT_MM      = 45.0  # 기본 하강량에 추가로 더 내려가는 거리(mm)
 SPIN_ANGLE_OFFSET          = 0.0   # 센서 프레임↔로봇 베이스 프레임 yaw 오차 보정값(deg), 실측 후 튜닝
 
 # ── 물체 방향 보정 ────────────────────────────────────────────────────

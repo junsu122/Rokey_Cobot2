@@ -3,14 +3,13 @@ vision_node.py
 ──────────────
 책임:
   1. RealSense 컬러 이미지 구독
-  2. YOLOv8 물체 검출 (bbox, class, confidence)
+  2. YOLOv8 물체 검출 (bbox, class, confidence) — 제스처 호버 선택용
   3. GestureEvent 구독 → 검지 끝 좌표로 호버 판정 + 손 스켈레톤 표시
   4. HOVER_SEC 동안 검지가 bbox 위에 머물면 SelectedObject 퍼블리시
   5. /is_picking 구독 → PICKING 오버레이 표시
   6. 어노테이션된 프레임을 cv2 창에 표시
-  7. YOLO 탐지 결과를 /yolo_detections 발행 (workspace_scan_coordinator 연동)
-  8. /voice_intent 구독 → 탐색 대상 설정 / 미발견 시 /object_not_found 발행
-  9. from_scan=true 수신 시 best_bbox 로 즉시 SelectedObject 발행
+  7. /voice_intent 구독 → 탐색 대상 설정 / 미발견 시 /object_not_found 발행
+  8. from_scan=true 수신 시 best_bbox 로 즉시 SelectedObject 발행
 
 구독:
   /camera/camera/color/image_raw  (sensor_msgs/Image)
@@ -20,7 +19,6 @@ vision_node.py
 
 퍼블리시:
   /selected_object                (SelectedObject)
-  /yolo_detections                (std_msgs/String)  ← coordinator 연동
   /object_not_found               (std_msgs/String)  ← publisher.py 연동
 """
 
@@ -77,9 +75,8 @@ class VisionNode(Node):
             self.get_parameter('voice_not_found_timeout').value)
 
         # ── 퍼블리셔 ──────────────────────────────────────────────────────
-        self._pub_obj        = self.create_publisher(SelectedObject, '/selected_object', 10)
-        self._pub_detections = self.create_publisher(String, '/yolo_detections', 10)
-        self._pub_not_found  = self.create_publisher(String, '/object_not_found', 10)
+        self._pub_obj       = self.create_publisher(SelectedObject, '/selected_object', 10)
+        self._pub_not_found = self.create_publisher(String, '/object_not_found', 10)
 
         # ── 구독 ──────────────────────────────────────────────────────────
         self._cb_group = ReentrantCallbackGroup()
@@ -226,10 +223,29 @@ class VisionNode(Node):
                 f'[VOICE_INTENT] action={action} targets={targets} '
                 f'from_scan={from_scan}')
 
-            # ── ② 스캔 후 재발행: best_bbox 로 즉시 선택 ────────────────
-            if from_scan and best_bbox and targets:
-                self._auto_select_from_scan(
-                    targets[0], best_bbox, float(data.get('confidence', 1.0)))
+            # ── ② 스캔 후 재발행: YOLO 우선 탐지, 실패 시 VLM bbox 폴백 ──
+            if from_scan and targets:
+                label = targets[0]
+                # YOLO 즉시 확인
+                with self._detect_lock:
+                    current_dets = list(self._detections)
+                for det in current_dets:
+                    if det['name'] == label:
+                        self.get_logger().info(
+                            f'[FROM_SCAN] ✅ YOLO 즉시 발견: {label}  '
+                            f'conf={det["conf"]:.2f}')
+                        self._auto_select_from_scan(
+                            label, det['box'], det['conf'])
+                        return
+                # YOLO 미발견 → 백그라운드에서 timeout 초 폴링 후 이미지 중앙 픽
+                self.get_logger().info(
+                    f'[FROM_SCAN] YOLO 미발견 → '
+                    f'{self._voice_not_found_timeout}s 대기')
+                threading.Thread(
+                    target=self._wait_for_yolo_then_pick,
+                    args=(label, self._voice_not_found_timeout),
+                    daemon=True,
+                ).start()
                 return
 
             # ── ③ 일반 경우: 현재 YOLO 탐지 결과 즉시 확인 ─────────────
@@ -329,6 +345,39 @@ class VisionNode(Node):
         self.get_logger().info(
             f'[OBJECT_NOT_FOUND] → found={found}, not_found={not_found}')
 
+    # ── 스캔 후 YOLO 대기 ────────────────────────────────────────────────
+
+    def _wait_for_yolo_then_pick(self, label: str, timeout: float):
+        """
+        센터링 후 YOLO가 대상을 잡을 때까지 timeout 초 대기.
+        발견 시 YOLO bbox로 픽 트리거.
+        시간 초과 시 이미지 중앙 bbox로 픽 트리거 (로봇이 물체 위에 있으므로).
+        VLM bbox는 사용하지 않음 (VLM은 센터링 전용).
+        """
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            with self._detect_lock:
+                dets = list(self._detections)
+            for det in dets:
+                if det['name'] == label:
+                    self.get_logger().info(
+                        f'[FROM_SCAN] ✅ YOLO 발견: {label}  '
+                        f'conf={det["conf"]:.2f} → YOLO bbox로 픽')
+                    self._auto_select_from_scan(
+                        label, det['box'], det['conf'])
+                    return
+            time.sleep(0.1)
+
+        # 타임아웃 → 이미지 중앙 bbox 사용 (센터링으로 로봇이 물체 위에 있음)
+        self.get_logger().warn(
+            f'[FROM_SCAN] YOLO {timeout:.1f}s 탐지 실패 '
+            f'→ 이미지 중앙 bbox로 픽 시도: {label}')
+        cx = self._img_w // 2
+        cy = self._img_h // 2
+        m  = 40
+        center_bbox = [cx - m, cy - m, cx + m, cy + m]
+        self._auto_select_from_scan(label, center_bbox, 0.5)
+
     # ── 스캔 결과로부터 즉시 선택 ─────────────────────────────────────────
 
     def _auto_select_from_scan(self, label: str, bbox: list, conf: float = 1.0):
@@ -392,8 +441,6 @@ class VisionNode(Node):
                             {'name': cls_name, 'box': b.tolist(), 'conf': conf})
                     with self._detect_lock:
                         self._detections = new_dets
-                    # /yolo_detections 발행 → workspace_scan_coordinator 수집
-                    self._publish_yolo_detections(new_dets)
                 except Exception as e:
                     self.get_logger().warn(f'YOLO predict error: {e}')
                     annotated = frame.copy()
@@ -547,28 +594,6 @@ class VisionNode(Node):
     # ─────────────────────────────────────────────────────────────────────
     # 발행 헬퍼
     # ─────────────────────────────────────────────────────────────────────
-
-    def _publish_yolo_detections(self, detections: list):
-        """
-        /yolo_detections 발행 → workspace_scan_coordinator 수집용.
-        형식: {"detections": [{"name":..., "box":..., "conf":...}], "timestamp":...}
-        """
-        msg      = String()
-        msg.data = json.dumps(
-            {
-                'detections': [
-                    {
-                        'name': d['name'],
-                        'box' : d['box'],
-                        'conf': round(float(d['conf']), 4),
-                    }
-                    for d in detections
-                ],
-                'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3],
-            },
-            ensure_ascii=False,
-        )
-        self._pub_detections.publish(msg)
 
     def _publish_selected(self, label: str, box: list, detections: list):
         """제스처 호버 선택 → /selected_object 발행"""

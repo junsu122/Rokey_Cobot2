@@ -24,7 +24,8 @@ setup(
     },
     entry_points={
         'console_scripts': [
-            'voice_intent_node  = jarvis_voice_pkg.voice_intent_node:main',
+            'voice_intent_node   = jarvis_voice_pkg.voice_intent_node:main',
+            'workspace_scan_node = jarvis_voice_pkg.workspace_scan_node:main',
         ],
     },
 )

@@ -20,7 +20,9 @@ ROS2 토픽 발행 + 콘솔 로그 모듈
 """
 
 import json
+import queue
 import threading
+import time
 from datetime import datetime
 from jarvis_voice_pkg.config import Config
 
@@ -28,14 +30,15 @@ from jarvis_voice_pkg.config import Config
 try:
     import rclpy
     from rclpy.node import Node
-    from std_msgs.msg import String
+    from std_msgs.msg import Bool, String
     ROS2_AVAILABLE = True
 except ImportError:
     ROS2_AVAILABLE = False
 
 
 # ── Vision 연동 대상 intent ───────────────────────────────────────────────────
-ROBOT_INTENTS = ("bring_object",)
+# going_out / take_medicine 도 최종적으로 물건을 집어야 하므로 포함
+ROBOT_INTENTS = ("bring_object", "going_out", "take_medicine")
 
 # 스캔 타임아웃 (초)
 SCAN_TIMEOUT_SEC = 60.0
@@ -61,6 +64,16 @@ class DualOutputPublisher:
         self.scan_cancelled: bool        = False
         self._scan_event   = threading.Event()
 
+        # ── 멀티 픽 큐 ────────────────────────────────────────────────────
+        self._is_picking        : bool        = False
+        self._prev_is_picking   : bool        = False   # 이전 상태 (전환 감지용)
+        self._scan_pick_pending : bool        = False   # 스캔 트리거 픽 완료 대기 중
+        self._queue_busy        : bool        = False   # 큐 워커가 아이템 처리 중
+        self._pick_queue        : queue.Queue = queue.Queue()
+        self._queue_thread = threading.Thread(
+            target=self._pick_queue_worker, daemon=True)
+        self._queue_thread.start()
+
         if ROS2_AVAILABLE:
             rclpy.init()
             self._node = Node("jarvis_voice_intent_node")
@@ -84,6 +97,9 @@ class DualOutputPublisher:
             self._node.create_subscription(
                 String, Config.TOPIC_SCAN_RESULT,
                 self._scan_result_cb, 10)
+            self._node.create_subscription(
+                Bool, "/is_picking",
+                self._is_picking_cb, 10)
 
             print("✅ [ROS2] jarvis_voice_intent_node 초기화 완료")
         else:
@@ -106,6 +122,69 @@ class DualOutputPublisher:
         print(f"🔊 [TTS] {text}")
         self._pub(self._tts_pub, self._with_timestamp({"message": text}))
 
+    # ── 멀티 픽 큐 워커 ──────────────────────────────────────────────────────
+
+    def _is_picking_cb(self, msg: Bool):
+        prev = self._is_picking
+        self._is_picking = msg.data
+
+        # 픽 시작 시 진행 중인 스캔 자동 취소
+        if msg.data and self.is_scanning and not self._scan_pick_pending:
+            cancel_payload = self._with_timestamp({
+                "action": "cancel",
+                "reason": "pick_started",
+            })
+            self._pub(self._scan_request_pub, cancel_payload)
+            print("🛑 [SCAN AUTO-CANCEL] 픽 시작 감지 → 스캔 자동 취소")
+
+        # 스캔-트리거 픽 완료 감지 → is_scanning 해제
+        if prev and not msg.data and self._scan_pick_pending:
+            self._scan_pick_pending = False
+            self.is_scanning = False
+            self._scan_event.set()
+            print("✅ [SCAN-PICK 완료] 픽 완료 → is_scanning=False, 다음 타겟 허용")
+
+    def is_robot_busy(self) -> bool:
+        """로봇이 픽/스캔/큐 작업 중이면 True (새 음성 명령 차단용)"""
+        return (self._is_picking
+                or self.is_scanning
+                or self._queue_busy
+                or not self._pick_queue.empty())
+
+    def _pick_queue_worker(self):
+        """큐에 쌓인 target_object를 완전히 하나씩 순서대로 처리"""
+        while True:
+            try:
+                item = self._pick_queue.get(timeout=1.0)
+            except queue.Empty:
+                continue
+
+            self._queue_busy = True
+            try:
+                # 앞선 픽/스캔이 완전히 끝날 때까지 대기
+                prior_deadline = time.time() + 180.0
+                while (self._is_picking or self.is_scanning) and time.time() < prior_deadline:
+                    time.sleep(0.3)
+
+                # 이 타겟 발행
+                self._pub(self._voice_intent_pub, self._with_timestamp(item))
+                print(f"  📡 [멀티픽 큐] /voice_intent 발행: {item.get('target_object')}")
+
+                # 시스템이 이 타겟 처리를 시작할 때까지 대기 (최대 10s)
+                # — YOLO hover_sec(2s) + vision_node 처리 시간 고려
+                startup_deadline = time.time() + 10.0
+                while (not self._is_picking and not self.is_scanning
+                       and time.time() < startup_deadline):
+                    time.sleep(0.2)
+
+                # 이 타겟 처리 완료까지 대기
+                # (_scan_pick_pending=True 동안 is_scanning=True 유지 → 스캔-트리거 픽 포함)
+                completion_deadline = time.time() + 180.0
+                while (self._is_picking or self.is_scanning) and time.time() < completion_deadline:
+                    time.sleep(0.3)
+            finally:
+                self._queue_busy = False
+
     # ── 구독 콜백 ─────────────────────────────────────────────────────────────
 
     def _object_not_found_cb(self, msg: String):
@@ -113,6 +192,11 @@ class DualOutputPublisher:
         vision_node로부터 물체 미감지 수신
         → TTS 안내 + /scan_request 발행 + 스캔 대기 상태 진입
         """
+        # 스캔 결과 처리 중이거나 픽 진행 중이면 재스캔 억제
+        # (센터링 후 YOLO 재탐지 실패 시 무한 스캔 루프 방지)
+        if self._is_picking or self.is_scanning:
+            print("⚠️  [object_not_found] 스캔/픽 진행 중 → 재스캔 스킵")
+            return
         try:
             data      = json.loads(msg.data)
             not_found = data.get("not_found", [])
@@ -172,23 +256,30 @@ class DualOutputPublisher:
             self.scan_result = data
 
             if status == "found":
-                found_labels = [obj["label"] for obj in found_objects]
+                found_labels       = [obj["label"] for obj in found_objects]
+                voice_intent_sent  = data.get("voice_intent_sent", False)
                 print(f"  ✅ found       : {found_labels}")
 
                 self._say(
                     f"{', '.join(found_labels)}을 찾았어요! 가져다 드릴게요.")
 
-                # /voice_intent 재발행 → vision_node pick 수행
-                for obj in found_objects:
-                    self._pub(self._voice_intent_pub, self._with_timestamp({
-                        "action"       : "bring_object",
-                        "target_object": [obj["label"]],
-                        "urgency"      : "normal",
-                        "from_scan"    : True,
-                        "best_pose"    : obj.get("best_pose"),
-                        "best_bbox"    : obj.get("best_bbox_xyxy"),
-                    }))
-                    print(f"  📡 /voice_intent 재발행: {obj['label']}")
+                # 스캔 트리거 픽이 완료될 때까지 is_scanning=True 유지
+                self._scan_pick_pending = True
+
+                if voice_intent_sent:
+                    # workspace_scan_node가 이미 직접 발행 → 중복 방지
+                    print("  📡 /voice_intent 이미 발행됨 (scan_node 직접) → 재발행 스킵")
+                else:
+                    # /voice_intent 재발행 → vision_node pick 수행
+                    for obj in found_objects:
+                        self._pub(self._voice_intent_pub, self._with_timestamp({
+                            "action"       : "bring_object",
+                            "target_object": [obj["label"]],
+                            "urgency"      : "normal",
+                            "from_scan"    : True,
+                            "best_pose"    : obj.get("best_pose"),
+                        }))
+                        print(f"  📡 /voice_intent 재발행: {obj['label']}")
 
             else:
                 items = ", ".join(target_objects)
@@ -204,8 +295,10 @@ class DualOutputPublisher:
 
         finally:
             # 스캔 완료 → 대기 해제
-            self.is_scanning = False
-            self._scan_event.set()
+            # _scan_pick_pending=True 면 is_scanning은 픽 완료 시 해제
+            if not self._scan_pick_pending:
+                self.is_scanning = False
+            self._scan_event.set()  # wait_for_scan_result() 블록 해제용
 
     def wait_for_scan_result(self, cancel_checker) -> str:
         """
@@ -280,14 +373,23 @@ class DualOutputPublisher:
                 }))
 
             if is_robot:
-                target = intent_result.get("target_object")
-                if isinstance(target, str):
-                    target = [target]
-                self._pub(self._voice_intent_pub, self._with_timestamp({
-                    "action"       : intent_name,
-                    "target_object": target,
-                    "urgency"      : intent_result.get("urgency"),
-                }))
+                objects = intent_result.get("target_objects") or []
+                if not objects:
+                    t = intent_result.get("target_object")
+                    objects = [t] if t else []
+
+                for obj in objects:
+                    payload = {
+                        # vision_node 의 _is_bring_action() 체크 통과를 위해
+                        # going_out / take_medicine 도 bring_object 로 통일
+                        "action"       : "bring_object",
+                        "target_object": [obj],
+                        "urgency"      : intent_result.get("urgency"),
+                        "origin_intent": intent_name,
+                    }
+                    # 모두 큐를 통해 순서 보장 (첫 번째도 즉시 발행하지 않음)
+                    self._pick_queue.put(payload)
+                    print(f"  🗂️  [멀티픽 큐 적재] {obj}")
 
         # 콘솔 출력
         mode = "ROS2 + 콘솔" if ROS2_AVAILABLE else "콘솔"

@@ -16,13 +16,15 @@ orchestrator_node.py
 """
 
 import threading
+import time
 
 import rclpy
 from rclpy.node import Node
 from rclpy.action import ActionClient
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.callback_groups import ReentrantCallbackGroup
-from std_msgs.msg import Bool
+import json
+from std_msgs.msg import Bool, String
 from dsr_msgs2.msg import RobotState
 
 from gesture_robot_interfaces.msg import GestureEvent, SelectedObject
@@ -51,6 +53,9 @@ class OrchestratorNode(Node):
         self.create_subscription(
             RobotState, f'/{ROBOT_ID}/state', self._robot_state_cb, 10,
             callback_group=self._cb_group)
+        self.create_subscription(
+            String, '/scan_result', self._scan_result_cb, 10,
+            callback_group=self._cb_group)
 
         # ── PickAndPlace 액션 클라이언트 ────────────
         self._pick_client = ActionClient(
@@ -64,9 +69,15 @@ class OrchestratorNode(Node):
         self._gesture_state       = ''
         self._is_picking          = False
         self._pick_lock           = threading.Lock()   # _is_picking 원자적 체크-앤-셋
+        self._pick_start_time     = None               # 픽 시작 시각 (타임아웃용)
         self._teleop_ever_enabled = False
         self._current_pos         = [0.0] * 6
         self._pos_received        = False
+        self._next_pick_from_scan = False              # 스캔 결과로 트리거된 픽 여부
+
+        # 픽 타임아웃 워치독 (120초 초과 시 강제 리셋)
+        PICK_TIMEOUT_SEC = 120.0
+        self.create_timer(10.0, lambda: self._pick_watchdog(PICK_TIMEOUT_SEC))
 
         self._set_teleop(False)
         self.get_logger().info('OrchestratorNode ready')
@@ -77,6 +88,18 @@ class OrchestratorNode(Node):
         if len(msg.current_posx) >= 6:
             self._current_pos  = list(msg.current_posx)
             self._pos_received = True
+
+    def _scan_result_cb(self, msg: String):
+        """스캔 결과 수신 → 다음 픽은 스캔 위치에서 수행 (HOME 스킵)"""
+        try:
+            data   = json.loads(msg.data)
+            status = data.get('status', '')
+            if status == 'found':
+                self._next_pick_from_scan = True
+                self.get_logger().info(
+                    '[SCAN] found → 다음 픽은 스캔 위치에서 수행 (from_scan=True)')
+        except Exception as e:
+            self.get_logger().warn(f'[SCAN RESULT] 파싱 오류: {e}')
 
     def _gesture_cb(self, msg: GestureEvent):
         prev               = self._gesture_state
@@ -95,7 +118,8 @@ class OrchestratorNode(Node):
             if self._is_picking:
                 self.get_logger().warn('[PICK SKIP] already picking')
                 return
-            self._is_picking = True   # 체크와 셋을 락 안에서 원자적으로 처리
+            self._is_picking      = True
+            self._pick_start_time = time.time()
 
         if not self._pos_received:
             self.get_logger().warn(
@@ -115,10 +139,17 @@ class OrchestratorNode(Node):
 
     def _send_pick_goal(self, obj_msg: SelectedObject):
         try:
+            from_scan      = self._next_pick_from_scan
+            self._next_pick_from_scan = False
+
             goal           = PickAndPlace.Goal()
             goal.label     = obj_msg.label
             goal.box       = [int(v) for v in obj_msg.box]
             goal.robot_tcp = [float(v) for v in self._current_pos]
+            goal.from_scan = from_scan
+
+            if from_scan:
+                self.get_logger().info('[PICK] from_scan=True → HOME 단계 스킵')
 
             fut = self._pick_client.send_goal_async(
                 goal, feedback_callback=self._pick_feedback_cb)
@@ -155,6 +186,18 @@ class OrchestratorNode(Node):
         except Exception as e:
             self.get_logger().error(f'[PICK] result exception: {e}')
             self._on_pick_done(success=False)
+
+    def _pick_watchdog(self, timeout_sec: float):
+        """픽이 timeout_sec 초 이상 걸리면 _is_picking을 강제 리셋."""
+        with self._pick_lock:
+            if not self._is_picking or self._pick_start_time is None:
+                return
+            elapsed = time.time() - self._pick_start_time
+            if elapsed < timeout_sec:
+                return
+        self.get_logger().error(
+            f'[WATCHDOG] 픽 타임아웃 {elapsed:.0f}s — _is_picking 강제 리셋')
+        self._on_pick_done(success=False)
 
     def _on_pick_done(self, success: bool):
         with self._pick_lock:

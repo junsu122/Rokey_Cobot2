@@ -18,6 +18,8 @@ import json
 from openai import OpenAI
 from jarvis_voice_pkg.config import Config, SYSTEM_PROMPT, GENERAL_QUERY_PROMPT
 
+O4_MINI_MODEL = "o4-mini"
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # 단계별 프롬프트
@@ -48,9 +50,12 @@ REASONING_PROMPT = """
 1. 가장 가능성 높은 intent는 무엇인가?
    (bring_object / going_out / take_medicine / emergency /
     cancel / weather_query / general_query / unknown)
-2. 목표 물체(target_object)는 무엇인가?
+2. 목표 물체(target_objects)는 무엇인가? 복수일 수 있음.
    (umbrella / bag / apple / banana / pill / phone /
     juice / sun_cream / water / candy / mask / bread / null)
+   건강 우선 원칙:
+   - 단 것 요청("달콤한 거", "단 거") → candy 대신 banana 선택
+   - 배고프다 표현("배고파", "많이 배고파") → bread + juice 복수 제공
 3. 긴급도(urgency)는? (high / normal / low)
 4. 멀티모달 입력 충돌이 있는가? 있다면 어떻게 해결하는가?
 5. 신뢰도(confidence)는 얼마인가? (0.0~1.0)
@@ -63,11 +68,12 @@ PLANNING_PROMPT = """
 아래 항목을 분석하고 자연어로 응답하세요. JSON 아님.
 
 분석 항목:
-1. 1순위로 수행할 행동과 대상 물체는?
-2. 추가로 필요한 물체나 행동이 있는가? (순서 포함)
+1. 집어야 할 물건 목록과 우선순위는? (물건이 여럿이면 순서도 명시)
+2. 복수 물건일 때 효율적인 픽 순서는? (가벼운 것 먼저, 액체·넘어지기 쉬운 것 나중)
 3. 날씨/상황 정보가 행동에 영향을 미치는가?
 4. 실패 시 대체 행동은?
 5. 사용자에게 전달할 TTS 메시지는?
+   (복수면 "A랑 B 가져다드릴게요" 형태로 자연스럽게)
 """
 
 
@@ -80,15 +86,54 @@ class IntentEngine:
     def __init__(self, api_key: str):
         self._client = OpenAI(api_key=api_key)
 
+    # ── 헬퍼 ─────────────────────────────────────────────────────────────────
+
+    def _build_content(self, text: str, image_b64: str | None):
+        """텍스트 + 이미지(있을 때)를 GPT content 형식으로 변환"""
+        if image_b64:
+            return [
+                {"type": "image_url",
+                 "image_url": {"url": f"data:image/jpeg;base64,{image_b64}"}},
+                {"type": "text", "text": text},
+            ]
+        return text
+
+    def _order_with_o4mini(self, objects: list[str]) -> list[str]:
+        """o4-mini로 복수 물건의 최적 픽 순서 결정"""
+        try:
+            resp = self._client.chat.completions.create(
+                model=O4_MINI_MODEL,
+                messages=[{"role": "user", "content": (
+                    f"로봇 팔로 집어야 할 물건 목록: {objects}\n"
+                    "가장 효율적인 픽 순서를 결정해줘.\n"
+                    "원칙: 가벼운 것 먼저, 액체/쏟아질 수 있는 것 나중.\n"
+                    "JSON으로만 답변: {\"order\": [\"물건1\", \"물건2\", ...]}"
+                )}],
+                max_tokens=100,
+            )
+            content = resp.choices[0].message.content
+            start = content.find("{")
+            end   = content.rfind("}") + 1
+            if start != -1 and end > start:
+                data = json.loads(content[start:end])
+                ordered = data.get("order", objects)
+                print(f"\n⚙️  [o4-mini 순서] {objects} → {ordered}")
+                return ordered
+        except Exception as e:
+            print(f"⚠️  [o4-mini] 순서 결정 실패 ({e}) — 기본 순서 사용")
+        return objects
+
     # ── 단계별 추론 ───────────────────────────────────────────────────────────
 
-    def _step1_perception(self, context: str) -> str:
-        """STEP 1: 상황 파악"""
+    def _step1_perception(self, context: str,
+                          image_b64: str | None = None) -> str:
+        """STEP 1: 상황 파악 (이미지 있으면 VLM으로 분석)"""
         resp = self._client.chat.completions.create(
             model=Config.GPT_MODEL,
             messages=[
                 {"role": "system", "content": PERCEPTION_PROMPT},
-                {"role": "user",   "content": context},
+                {"role": "user",
+                 "content": self._build_content(context, image_b64)},
             ],
             temperature=0.1,
         )
@@ -133,24 +178,34 @@ class IntentEngine:
         return result
 
     def _step4_final(self, context: str, perception: str,
-                     reasoning: str, planning: str) -> dict:
-        """STEP 4: 최종 JSON 출력"""
+                     reasoning: str, planning: str,
+                     image_b64: str | None = None) -> dict:
+        """STEP 4: 최종 JSON 출력 (이미지 있으면 VLM으로 최종 확인)"""
+        user_text = (
+            f"[원본 입력]\n{context}\n\n"
+            f"[STEP1 상황 파악]\n{perception}\n\n"
+            f"[STEP2 의도 추론]\n{reasoning}\n\n"
+            f"[STEP3 행동 계획]\n{planning}\n\n"
+            "위 3단계 분석을 바탕으로 최종 JSON을 출력하세요."
+        )
         resp = self._client.chat.completions.create(
             model=Config.GPT_MODEL,
             messages=[
                 {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user",   "content": (
-                    f"[원본 입력]\n{context}\n\n"
-                    f"[STEP1 상황 파악]\n{perception}\n\n"
-                    f"[STEP2 의도 추론]\n{reasoning}\n\n"
-                    f"[STEP3 행동 계획]\n{planning}\n\n"
-                    f"위 3단계 분석을 바탕으로 최종 JSON을 출력하세요."
-                )},
+                {"role": "user",
+                 "content": self._build_content(user_text, image_b64)},
             ],
             temperature=Config.GPT_TEMPERATURE,
             response_format={"type": "json_object"},
         )
-        return json.loads(resp.choices[0].message.content)
+        result = json.loads(resp.choices[0].message.content)
+
+        # target_objects 정규화: 없으면 target_object로 채움
+        if "target_objects" not in result or not result["target_objects"]:
+            t = result.get("target_object")
+            result["target_objects"] = [t] if t else []
+
+        return result
 
     # ── 공개 API ──────────────────────────────────────────────────────────────
 
@@ -160,6 +215,7 @@ class IntentEngine:
         detected_objects: list[str]  = None,
         current_action  : str | None = None,
         gesture         : str | None = None,
+        image_b64       : str | None = None,
     ) -> dict:
         """
         3단계 Chain of Thought 의도 추론
@@ -188,12 +244,20 @@ class IntentEngine:
         print(f"{'─'*50}")
 
         # 3단계 순차 추론
-        perception = self._step1_perception(context)
+        perception = self._step1_perception(context, image_b64)
         reasoning  = self._step2_reasoning(context, perception)
         planning   = self._step3_planning(context, perception, reasoning)
-        result     = self._step4_final(context, perception, reasoning, planning)
+        result     = self._step4_final(context, perception, reasoning,
+                                       planning, image_b64)
 
-        print(f"\n✅ [STEP 4 - 최종 결과] intent={result.get('intent')}")
+        # 복수 물건이면 o4-mini로 순서 최적화
+        objects = result.get("target_objects", [])
+        if len(objects) > 1:
+            result["target_objects"] = self._order_with_o4mini(objects)
+            result["target_object"]  = result["target_objects"][0]
+
+        print(f"\n✅ [STEP 4 - 최종 결과] intent={result.get('intent')}  "
+              f"objects={result.get('target_objects')}")
         print(f"{'─'*50}")
 
         return result
@@ -204,6 +268,7 @@ class IntentEngine:
         detected_objects: list[str]  = None,
         current_action  : str | None = None,
         gesture         : str | None = None,
+        image_b64       : str | None = None,
     ) -> dict:
         """
         단일 호출 빠른 추론 (3단계 생략, 응답 속도 우선)
@@ -224,12 +289,19 @@ class IntentEngine:
             model=Config.GPT_MODEL,
             messages=[
                 {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user",   "content": "\n".join(lines)},
+                {"role": "user",
+                 "content": self._build_content("\n".join(lines), image_b64)},
             ],
             temperature=Config.GPT_TEMPERATURE,
             response_format={"type": "json_object"},
         )
-        return json.loads(resp.choices[0].message.content)
+        result = json.loads(resp.choices[0].message.content)
+
+        if "target_objects" not in result or not result["target_objects"]:
+            t = result.get("target_object")
+            result["target_objects"] = [t] if t else []
+
+        return result
 
     def answer_general(self, voice_text: str) -> str:
         """
