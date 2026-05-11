@@ -37,7 +37,7 @@ from rclpy.executors import MultiThreadedExecutor
 from rclpy.callback_groups import ReentrantCallbackGroup
 from sensor_msgs.msg import Image
 from cv_bridge import CvBridge
-from std_msgs.msg import Bool
+from std_msgs.msg import Bool, String
 from dsr_msgs2.srv import MoveLine
 from dsr_msgs2.msg import RobotState
 
@@ -120,6 +120,15 @@ class WebcamTeleopNode(Node):
         self._cv_bridge   = CvBridge()
         self._frame_count = 0
 
+##############################################################준수 추가 부분########################################
+        # [추가] 가상 복구 버튼(RECOVER) 퍼블리셔 및 변수
+        self._pub_recovery = self.create_publisher(String, f'/{ROBOT_ID}/recovery_command', 10)
+        self._recovery_start_time = None
+        self._recovery_triggered = False
+        self._recovery_duration = 2.0
+        self._btn_x1, self._btn_y1 = 450, 350
+        self._btn_x2, self._btn_y2 = 620, 460
+#######################################################################################################
         # ── 구독 ─────────────────────────────────────
         self._cb_group = ReentrantCallbackGroup()
         self.create_subscription(
@@ -276,6 +285,14 @@ class WebcamTeleopNode(Node):
         future = self._move_cli.call_async(req)
         future.add_done_callback(self._move_done_cb)
 
+        # 뚝뚝거림 해결: radius가 이동 거리를 넘지 않게 리미트 걸기
+        total_dist = sum(abs(d) for d in delta)
+
+        req.radius = min(
+            max(ABS_BLEND_R, total_dist * 0.5),  # 기존 로직 (하한 보장)
+            total_dist * 0.45                     # 상한: 이동 거리의 45% 초과 금지
+        )
+        
     def _move_done_cb(self, future):
         try:
             res = future.result()
@@ -329,6 +346,9 @@ class WebcamTeleopNode(Node):
                                             fist, pointing)
 
                 self._draw_ui(frame, avg_x, avg_y, hand_visible)
+
+                # [추가] 가상 복구 버튼 렌더링 및 판정
+                self._handle_recovery_button(frame, index_x, index_y, hand_visible)
 
                 # 5프레임마다 웹캠 영상 발행 (JARVIS 두리번 감지용)
                 self._frame_count += 1
@@ -632,6 +652,53 @@ class WebcamTeleopNode(Node):
 
         cv2.putText(frame, 'R:recalib  SPACE:pause  C:clear  Q:quit',
                     (w - 330, h - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.38, (90, 90, 90), 1)
+
+# ── 가상 복구 버튼 처리 ───────────────────────────  ###################################준수 추가 부분
+    def _handle_recovery_button(self, frame, index_x, index_y, hand_visible):
+        h, w = frame.shape[:2]
+        btn_color = (0, 0, 255) # 기본 빨간색 테두리
+        is_inside = False
+
+        # hand_visible이 True이고, index_x/y 좌표가 있을 때만 계산
+        if hand_visible and index_x is not None and index_y is not None:
+            # 정규화된 좌표(0~1)를 화면 픽셀 좌표로 변환
+            ix, iy = int(index_x * w), int(index_y * h)
+            
+            # 검지 손가락 끝에 노란 점 표시 (기존 UI와 겹치지 않게)
+            cv2.circle(frame, (ix, iy), 10, (255, 255, 0), -1)
+
+            # 손가락 끝이 버튼 영역 안에 있는지 확인
+            if self._btn_x1 < ix < self._btn_x2 and self._btn_y1 < iy < self._btn_y2:
+                is_inside = True
+                btn_color = (0, 255, 0) # 영역 안이면 초록색
+
+        if is_inside:
+            if self._recovery_start_time is None:
+                self._recovery_start_time = time.time()
+            
+            elapsed = time.time() - self._recovery_start_time
+            remaining = max(0, self._recovery_duration - elapsed)
+
+            # 텍스트로 남은 시간(게이지) 표시
+            cv2.putText(frame, f"{remaining:.1f}s", (self._btn_x1 + 10, self._btn_y1 + 40), 
+                        cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
+
+            # 2초 경과 시 한 번만 RECOVER 메시지 발행
+            if elapsed >= self._recovery_duration and not self._recovery_triggered:
+                msg = String()
+                msg.data = "RECOVER"
+                self._pub_recovery.publish(msg)
+                self.get_logger().info("★★★ Virtual Button Triggered: RECOVER sent! ★★★")
+                self._recovery_triggered = True
+        else:
+            # 손가락이 영역을 벗어나면 초기화
+            self._recovery_start_time = None
+            self._recovery_triggered = False
+
+        # 가상 버튼 사각형 및 텍스트 렌더링
+        cv2.rectangle(frame, (self._btn_x1, self._btn_y1), (self._btn_x2, self._btn_y2), btn_color, 3)
+        cv2.putText(frame, "RECOVER", (self._btn_x1, self._btn_y1 - 10), 
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, btn_color, 2)
 
     # ── 키보드 헬퍼 ───────────────────────────────────
 

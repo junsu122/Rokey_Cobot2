@@ -22,7 +22,7 @@ def generate_launch_description():
 
     # ── Launch Arguments ────────────────────────────
     webcam_index_arg = DeclareLaunchArgument(
-        'webcam_index', default_value='6',
+        'webcam_index', default_value='0',
         description='Webcam device index (cv2.VideoCapture)')
 
     position_control_arg = DeclareLaunchArgument(

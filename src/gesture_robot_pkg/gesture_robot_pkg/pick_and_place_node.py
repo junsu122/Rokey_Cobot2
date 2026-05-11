@@ -44,9 +44,10 @@ pick_and_place_node.py
 
 import time
 import threading
+import json
 
 import numpy as np
-from std_msgs.msg import Float32 
+from std_msgs.msg import Float32, String
 from cv_bridge import CvBridge
 
 import rclpy
@@ -76,7 +77,7 @@ from gesture_robot_pkg.constants import (
     PICK_SAFE_Z_MIN_MM, PICK_SAFE_Z_MAX_MM,
     PICK_OFFSET_X_MM, PICK_OFFSET_Y_MM, PICK_OFFSET_Z_MM,
 )
-from gesture_robot_pkg.utils import transform_camera_to_base
+from gesture_robot_pkg.utils import transform_camera_to_base, get_orientation_offset
 
 
 class PickAndPlaceNode(Node):
@@ -93,11 +94,43 @@ class PickAndPlaceNode(Node):
             self._angle_cb,
             10,
             callback_group=self._cb_group)
-        self._spin_angle = 0.0
-        self._angle_event = threading.Event()  # SPIN_CHUCK 전 각도 수신 대기용
+        self._spin_angle        = 0.0
+        self._angle_received_at = 0.0   # 마지막 /object_angle 수신 시각
+        self._pick_start_time   = 0.0   # _execute_inner 시작 시각 (GRACE_PERIOD 기준)
 
         self.depth_info_pub = self.create_publisher(Float32MultiArray, '/object_depth_data', 10) ####################각도 변환 준수가 쓰는 데이터####################3
 
+        self._paused = False
+        self._stopped = False
+
+        self._current_stage = 'IDLE'
+
+        self._motion_lock = threading.Lock()
+        self._motion_active = False 
+    
+        self.main_cmd_sub = self.create_subscription(
+            String,
+            '/main/basic_command',
+            self._main_command_cb,
+            10,
+            callback_group=self._cb_group
+        )
+        
+        self.control_state_pub = self.create_publisher(
+            String,
+            '/robot/control_state',
+            10
+        )
+
+        self._home_request_sub = self.create_subscription(
+            String,
+            '/robot/request_home',
+            self._home_request_callback,
+            10,
+            callback_group=self._cb_group
+        )
+        self._is_actually_recovering = False  # 복구 버튼이 눌렸는지 확인용 플래그
+        self._current_stage_index = 0  # 이 줄을 추가하세요
 
         # ── 액션 서버 ─────────────────────────────────────────────────────
         self._action_server = ActionServer(
@@ -226,9 +259,68 @@ class PickAndPlaceNode(Node):
             self._tcp_received.set()
 
     def _angle_cb(self, msg: Float32):
-        self._spin_angle = float(msg.data)
-        self._angle_event.set()
+        self._spin_angle        = float(msg.data)
+        self._angle_received_at = time.time()
         self.get_logger().info(f'[TOPIC] Received object_angle: {self._spin_angle:.1f}°')
+
+####################################################### 예외처리를 위한 코드        
+    def _main_command_cb(self, msg: String):
+        try:
+            data = json.loads(msg.data)
+        except Exception as e:
+            self.get_logger().error(f'[MAIN CMD] JSON parse error: {e}')
+            return
+
+        command = data.get('command', '')
+
+        if command == 'RESUME':
+            # [수정된 핵심 로직]
+            # 1. 처음 켜진 게 아니라, 에러(STOP)나 일시정지(PAUSE)로 인해 멈춰있던 상태였는지 확인
+            if self._stopped or self._paused:
+                self.get_logger().info("▶️ [RESUME] 복구 신호 수신! 작업을 재개합니다.")
+                
+                # 상태 복구
+                self._paused = False
+                self._stopped = False
+
+                # 홈 이동 대신, 현재 stage에서 작업을 재개하도록 루프 트리거
+                # 준수님의 pick_and_place_node에 정의된 메인 실행 함수를 호출합니다.
+                # 보통 _run_task_loop나 유사한 이름의 함수일 것입니다.
+                # 별도의 timer 호출(_run_task_loop)은 삭제합니다.
+            else:
+                self.get_logger().info("ℹ️ [RESUME] 일반 시작 신호 무시")
+
+        elif command == 'PAUSE':
+            self._paused = True
+            self.get_logger().warn('⏸️ [MAIN CMD] PAUSE received')
+
+        elif command == 'STOP':
+            self._stopped = True
+            self.get_logger().error('🛑 [MAIN CMD] STOP received (Exception)')
+
+        elif command == 'START':
+            self._paused = False
+            # self._stopped = False
+            self._current_stage = 'IDLE'
+
+            self.get_logger().info('[MAIN CMD] START received')
+
+            self._publish_control_state()
+
+    def _set_motion_active(self, active: bool):
+
+        with self._motion_lock:
+            self._motion_active = active
+
+    def _publish_control_state(self):
+        msg = String()
+        msg.data = json.dumps({
+            'paused': self._paused,
+            'stopped': self._stopped,
+            'stage': self._current_stage
+        })
+
+        self.control_state_pub.publish(msg)
 
     # ── 액션 콜백 ─────────────────────────────────────────────────────────
 
@@ -267,11 +359,35 @@ class PickAndPlaceNode(Node):
 
     async def _execute_inner(self, goal_handle, goal, result):
 
-        # 픽 시작 시 각도 이벤트 초기화 (이전 픽의 각도 재사용 방지)
-        self._angle_event.clear()
-        self._spin_angle = 0.0
+        # 픽 시작 시각 기록 (GRACE_PERIOD로 유효 각도 판별)
+        # _angle_event.clear() 제거: workspace_scan_node가 픽 전에 각도를 미리 계산하므로
+        # clear() 하면 이미 도착한 유효한 각도가 지워짐
+        self._spin_angle        = 0.0
+        self._angle_received_at = 0.0   # 이전 픽의 타임스탬프가 GRACE_PERIOD 체크를 오통과하는 것을 방지
+        self._pick_start_time   = time.time()
 
         from_scan = bool(goal.from_scan)
+
+        # ── from_scan 픽: APPROACH 전에 각도 수신 완료까지 대기 ────────────
+        # workspace_scan_node가 centering movel + time.sleep() 후 /voice_intent를 발행하므로
+        # /selected_object → /_2d_to_3d_point → /z_edge_marker 5샘플 → /object_angle
+        # 파이프라인이 완료될 때까지 여기서 블록해야 APPROACH(카메라 이동) 전에 각도 확정됨.
+        if from_scan:
+            ANGLE_WAIT_SEC = 15.0
+            _wait_start = time.time()
+            while self._angle_received_at == 0.0:
+                elapsed = time.time() - _wait_start
+                if elapsed >= ANGLE_WAIT_SEC:
+                    break
+                time.sleep(0.05)
+            elapsed = time.time() - _wait_start
+            if self._angle_received_at != 0.0:
+                self.get_logger().info(
+                    f'[ANGLE READY] 센터링 위치 각도 수신 완료: {self._spin_angle:.1f}°  '
+                    f'({elapsed:.2f}s 대기)')
+            else:
+                self.get_logger().warn(
+                    f'[ANGLE TIMEOUT] {ANGLE_WAIT_SEC:.0f}s 내 /object_angle 미수신 — 0.0° 폴백')
 
         # ── TCP 획득: GetCurrentPosx 서비스 우선, 상태 토픽 fallback ──────
         # dsr_hw_interface2 드라이버가 /dsr01/state 토픽을 발행하지 않는 경우가 있어
@@ -495,41 +611,97 @@ class PickAndPlaceNode(Node):
         GRASP_INDEX = 3 if from_scan else 4
         grasped = False
 
-        for i, (stage_name, stage_fn, *fn_args) in enumerate(stages):
-            if goal_handle.is_cancel_requested:
-                if grasped and self._gripper is not None:
-                    self.get_logger().warn('[CANCEL] opening gripper before cancel')
-                    self._gripper.open_gripper()
-                    self._wait_gripper(5.0)
-                goal_handle.canceled()
-                result.success = False
-                result.message = 'Cancelled'
-                return result
+        # 1. 멈췄던 지점부터 시작 (for문 대신 while문 사용)
+        i = getattr(self, '_current_stage_index', 0)
 
-            fb          = PickAndPlace.Feedback()
-            fb.stage    = stage_name
-            fb.progress = i / len(stages)
-            goal_handle.publish_feedback(fb)
+        while i < len(stages):
+            stage_name, stage_fn, *fn_args = stages[i]
+            
+            # 현재 단계와 인덱스 업데이트
+            self._current_stage = stage_name
+            self._current_stage_index = i 
+            self._publish_control_state()
 
-            self.get_logger().info(f'[{i+1}/{len(stages)}] {stage_name}')
             try:
+                # 중지/일시정지 체크
+                await self._check_main_control()
+
+                # --- 피드백 및 취소 요청 처리 ---
+                if goal_handle.is_cancel_requested:
+                    if grasped and self._gripper is not None:
+                        self._gripper.open_gripper()
+                        self._wait_gripper(5.0)
+                    goal_handle.canceled()
+                    result.success = False
+                    return result
+
+                fb = PickAndPlace.Feedback()
+                fb.stage = stage_name
+                fb.progress = i / len(stages)
+                goal_handle.publish_feedback(fb)
+                # --------------------------------------------
+
+                self.get_logger().info(f'[{i+1}/{len(stages)}] {stage_name}')
+                
+                # 실제 동작 실행
                 await stage_fn(*fn_args)
                 if i == GRASP_INDEX:
                     grasped = True
+                
+                # 에러 없이 성공적으로 마쳤으면 다음 스테이지로 이동
+                i += 1
+                    
             except Exception as e:
-                self.get_logger().error(f'[{stage_name}] {e}')
-                if grasped and self._gripper is not None:
-                    self.get_logger().warn(f'[{stage_name}] opening gripper for safety')
-                    self._gripper.open_gripper()
-                    self._wait_gripper(5.0)
-                result.success = False
-                result.message = f'{stage_name} failed: {e}'
-                goal_handle.abort()
-                return result
+                self.get_logger().error(f'[{stage_name}] 에러 발생: {e}')
+                
+                # [핵심 수정] 하드웨어 예외 발생 시, 서비스(movel/movej) 실패가 먼저 반환되고 
+                # Main 노드의 PAUSE/STOP 토픽이 수 밀리초 뒤에 도착하는 타이밍 이슈가 있습니다.
+                # 상태 동기화를 위해 잠시 대기합니다.
+                time.sleep(1.0)
+                
+                err_msg = str(e).upper()
+                # STOP, PAUSE 상태이거나, 모션 실패(FAIL) 관련 에러인 경우 모두 복구 대기 상태로 진입
+                if self._stopped or self._paused or 'STOP' in err_msg or 'FAIL' in err_msg:
+                    self.get_logger().warn(f'🛑 [{stage_name}] 모션 실패 또는 중단 토픽 수신. RESUME(복구) 신호를 대기합니다...')
+                    
+                    # 대기 루프 진입을 위해 강제로 paused 상태로 둡니다 (토픽 유실 대비)
+                    if not (self._stopped or self._paused):
+                        self._paused = True
+                        
+                    while self._stopped or self._paused:
+                        time.sleep(0.5)
+                        
+                        # 대기 중 사용자가 취소를 요청한 경우
+                        if goal_handle.is_cancel_requested:
+                            goal_handle.canceled()
+                            result.success = False
+                            return result
+
+                    self.get_logger().info(f'▶️ [{stage_name}] RESUME 수신 완료! 로봇 모드 초기화 후 단계를 재시도합니다.')
+                    
+                    # 로봇이 에러에서 복구되면서 모드가 풀렸을 수 있으므로 AUTONOMOUS 모드 강제 재설정
+                    await self._ensure_autonomous_mode()
+                    time.sleep(0.5)
+                    
+                    # 루프의 맨 위로 돌아가 현재 단계를 처음부터 다시 실행
+                    continue
+                else:
+                    # 예상치 못한 코드 버그 등의 진짜 에러라면 액션 취소
+                    result.success = False
+                    result.message = f'{stage_name} 실패: {e}'
+                    goal_handle.abort()
+                    return result
+
+        # 모든 stages를 다 마쳤을 때만 인덱스 초기화
+        self._current_stage_index = 0
 
         result.success = True
         result.message = 'Pick and place completed'
         goal_handle.succeed()
+
+        self._current_stage = 'IDLE'
+        self._publish_control_state()
+
         self.get_logger().info('[DONE] Pick and place succeeded.')
         return result
 
@@ -538,8 +710,21 @@ class PickAndPlaceNode(Node):
     # sync_type=0 을 사용해야 이동 완료 후 다음 단계로 진행됨.
     # await call_async(req) 는 rclpy.task.Future 를 yield 하므로
     # 다른 콜백이 executor 를 공유할 수 있음.
+    async def _check_main_control(self):
+        if self._stopped:
+            raise RuntimeError('STOP requested from main_node')
 
+        while self._paused:
+            self.get_logger().warn(
+                f'[MAIN CONTROL] PAUSED at stage={self._current_stage}')
+            time.sleep(0.1)
+
+            if self._stopped:
+                raise RuntimeError('STOP requested during PAUSE')
+                
     async def _movel_async(self, pos: list, vel: int, acc: int):
+        self._set_motion_active(True)
+
         if not self._movel_cli.service_is_ready():
             raise RuntimeError('move_line service not available — /dsr01/motion/move_line 미연결')
         req            = MoveLine.Request()
@@ -556,18 +741,34 @@ class PickAndPlaceNode(Node):
             f'[MOVEL REQ] pos=[{pos[0]:.1f}, {pos[1]:.1f}, {pos[2]:.1f}, '
             f'{pos[3]:.2f}, {pos[4]:.2f}, {pos[5]:.2f}]  '
             f'vel={vel}  acc={acc}  ref=BASE  mode=ABS  sync=SYNC')
-        res = await self._movel_cli.call_async(req)
-        if res is None:
-            raise RuntimeError('movel failed: 서비스 응답 없음 (timeout?)')
-        self.get_logger().info(f'[MOVEL RES] success={res.success}')
-        if not res.success:
-            raise RuntimeError(
-                f'movel failed: success=False  '
-                f'(로봇이 좌표를 거부함. 워크스페이스 초과 또는 모드 문제)')
+        try:
+            res = await self._movel_cli.call_async(req)
+            if self._stopped:
+                raise RuntimeError(
+                    'Motion aborted by STOP'
+                )
+
+            if res is None:
+                raise RuntimeError('movel failed: 서비스 응답 없음 (timeout?)')
+
+            self.get_logger().info(f'[MOVEL RES] success={res.success}')
+
+            if not res.success:
+                raise RuntimeError(
+                    f'movel failed: success=False  '
+                    f'(로봇이 좌표를 거부함. 워크스페이스 초과 또는 모드 문제)')
+
+        finally:
+
+            self._set_motion_active(False)
 
     async def _movej_async(self, joints: list, vel: int, acc: int):
+        self._set_motion_active(True)
+
         if not self._movej_cli.service_is_ready():
+            self._set_motion_active(False)
             raise RuntimeError('move_joint service not available — /dsr01/motion/move_joint 미연결')
+
         req            = MoveJoint.Request()
         req.pos        = [float(v) for v in joints]
         req.vel        = float(vel)
@@ -580,14 +781,28 @@ class PickAndPlaceNode(Node):
         self.get_logger().info(
             f'[MOVEJ REQ] joints={[f"{v:.1f}" for v in joints]}  '
             f'vel={vel}  acc={acc}  sync=SYNC')
-        res = await self._movej_cli.call_async(req)
-        if res is None:
-            raise RuntimeError('movej failed: 서비스 응답 없음')
-        self.get_logger().info(f'[MOVEJ RES] success={res.success}')
-        if not res.success:
-            raise RuntimeError(
-                f'movej failed: success=False  '
-                f'(로봇이 조인트 이동 거부. 모드 또는 조인트 한계 문제)')
+        
+
+        try:
+            res = await self._movej_cli.call_async(req)
+            if self._stopped:
+                raise RuntimeError(
+                    'Joint motion aborted by STOP'
+                )
+
+            if res is None:
+                raise RuntimeError('movej failed: 서비스 응답 없음')
+
+            self.get_logger().info(f'[MOVEJ RES] success={res.success}')
+
+            if not res.success:
+                raise RuntimeError(
+                    f'movej failed: success=False  '
+                    f'(로봇이 조인트 이동 거부. 모드 또는 조인트 한계 문제)'
+                )
+
+        finally:
+            self._set_motion_active(False)
 
     # ── 그리퍼 헬퍼 (블로킹 — MultiThreadedExecutor 스레드이므로 허용) ──────
 
@@ -648,10 +863,22 @@ class PickAndPlaceNode(Node):
         이후 DESCEND / LIFT 등 모든 단계가 갱신된 rz를 그대로 유지한다.
         target_rz = 현재 rz + spin_angle(물체 각도 오프셋) + SPIN_ANGLE_OFFSET(프레임 보정)
         """
-        # /object_angle 수신 대기 (최대 2초, 미수신 시 0.0° 사용)
-        got = self._angle_event.wait(timeout=2.0)
+        # workspace_scan_node가 픽 전에 각도를 미리 계산해 두었으므로
+        # _pick_start_time 기준 GRACE_PERIOD 이내에 수신된 각도는 유효하게 처리.
+        # (이전 물체의 각도는 GRACE_PERIOD 초과 → 자동 무시)
+        GRACE_PERIOD = 15.0   # 픽 시작 15초 전까지 수집된 각도 유효 (이전 물체 각도 차단)
+        SPIN_TIMEOUT = 30.0   # 각도 미도착 시 추가 최대 30초 대기
+
+        deadline = time.time() + SPIN_TIMEOUT
+        got = False
+        while time.time() < deadline:
+            if self._angle_received_at >= (self._pick_start_time - GRACE_PERIOD):
+                got = True
+                break
+            time.sleep(0.05)
         if not got:
-            self.get_logger().warn('[SPIN_CHUCK] /object_angle 미수신 (2s) — 0.0° 사용')
+            self.get_logger().warn(
+                f'[SPIN_CHUCK] /object_angle 미수신 ({SPIN_TIMEOUT:.0f}s) — 0.0° 사용')
 
         current_rz = pt[5]
         target_rz  = current_rz + self._spin_angle + SPIN_ANGLE_OFFSET
@@ -989,6 +1216,23 @@ class PickAndPlaceNode(Node):
 
         threading.Thread(target=run_home, daemon=True).start()
 
+    def _home_request_callback(self, msg):
+        if msg.data == "GO_HOME":
+            self.get_logger().info("📥 [SIGNAL] 홈 이동 요청 수신. 초기화 시퀀스를 시작합니다.")
+            
+            # 현재 진행 중인 동작이 있다면 멈추거나 상태를 초기화하는 로직이 필요할 수 있습니다.
+            # 여기서는 단순히 타이머를 다시 생성하여 _initial_home_move가 실행되게 합니다.
+            
+            if self._home_timer:
+                self._home_timer.cancel()
+                
+            # 1초 뒤에 _initial_home_move 실행
+            self._home_timer = self.create_timer(
+                1.0, 
+                self._initial_home_move, 
+                callback_group=self._cb_group
+            )
+
 
 def main(args=None):
     rclpy.init(args=args)
@@ -997,6 +1241,8 @@ def main(args=None):
     executor.add_node(node)
     try:
         executor.spin()
+    except KeyboardInterrupt:
+        node.get_logger().info('Keyboard Interrupt (SIGINT)')
     finally:
         executor.shutdown()
         node.destroy_node()
