@@ -154,10 +154,7 @@ class OrchestratorNode(Node):
         try:
             data   = json.loads(msg.data)
             status = data.get('status', '')
-            if status == 'found':
-                self._next_pick_from_scan = True
-                self.get_logger().info(
-                    '[SCAN] found → 다음 픽은 스캔 위치에서 수행 (from_scan=True)')
+            self.get_logger().info(f'[SCAN RESULT] status={status}')
         except Exception as e:
             self.get_logger().warn(f'[SCAN RESULT] 파싱 오류: {e}')
 
