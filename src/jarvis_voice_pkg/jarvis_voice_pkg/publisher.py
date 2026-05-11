@@ -135,24 +135,7 @@ class DualOutputPublisher:
     # ── 멀티 픽 큐 워커 ──────────────────────────────────────────────────────
 
     def _is_picking_cb(self, msg: Bool):
-        prev = self._is_picking
         self._is_picking = msg.data
-
-        # 픽 시작 시 진행 중인 스캔 자동 취소
-        if msg.data and self.is_scanning and not self._scan_pick_pending:
-            cancel_payload = self._with_timestamp({
-                "action": "cancel",
-                "reason": "pick_started",
-            })
-            self._pub(self._scan_request_pub, cancel_payload)
-            print("🛑 [SCAN AUTO-CANCEL] 픽 시작 감지 → 스캔 자동 취소")
-
-        # 스캔-트리거 픽 완료 감지 → is_scanning 해제
-        if prev and not msg.data and self._scan_pick_pending:
-            self._scan_pick_pending = False
-            self.is_scanning = False
-            self._scan_event.set()
-            print("✅ [SCAN-PICK 완료] 픽 완료 → is_scanning=False, 다음 타겟 허용")
 
     def is_robot_busy(self) -> bool:
         """로봇이 픽/스캔/큐 작업 중이면 True (새 음성 명령 차단용)"""
@@ -278,23 +261,20 @@ class DualOutputPublisher:
                 self._say(
                     f"{', '.join(found_kr)}{josa} 찾았어요! 가져다 드릴게요.")
 
-                # 스캔 트리거 픽이 완료될 때까지 is_scanning=True 유지
-                self._scan_pick_pending = True
-
                 if voice_intent_sent:
-                    # workspace_scan_node가 이미 직접 발행 → 중복 방지
-                    print("  📡 /voice_intent 이미 발행됨 (scan_node 직접) → 재발행 스킵")
+                    # scan_node가 모든 픽 완료 후 발행 → 재발행 불필요
+                    print("  📡 scan_node 직접 처리 완료 → 재발행 스킵")
                 else:
-                    # /voice_intent 재발행 → vision_node pick 수행
+                    # fallback: 큐에 순서대로 적재
                     for obj in found_objects:
-                        self._pub(self._voice_intent_pub, self._with_timestamp({
+                        self._pick_queue.put({
                             "action"       : "bring_object",
                             "target_object": [obj["label"]],
                             "urgency"      : "normal",
                             "from_scan"    : True,
                             "best_pose"    : obj.get("best_pose"),
-                        }))
-                        print(f"  📡 /voice_intent 재발행: {obj['label']}")
+                        })
+                        print(f"  📡 /voice_intent 큐 적재: {obj['label']}")
 
             else:
                 target_kr = [OBJECT_NAMES_KR.get(o, o) for o in target_objects]
@@ -311,11 +291,10 @@ class DualOutputPublisher:
             print(f"❌ [scan_result 파싱 오류] {e}")
 
         finally:
-            # 스캔 완료 → 대기 해제
-            # _scan_pick_pending=True 면 is_scanning은 픽 완료 시 해제
-            if not self._scan_pick_pending:
-                self.is_scanning = False
-            self._scan_event.set()  # wait_for_scan_result() 블록 해제용
+            # scan_result는 workspace_scan_node가 모든 픽 완료 후 발행
+            # → 수신 시점에 이미 모든 픽 완료 → 즉시 is_scanning 해제
+            self.is_scanning = False
+            self._scan_event.set()
 
     def wait_for_scan_result(self, cancel_checker) -> str:
         """

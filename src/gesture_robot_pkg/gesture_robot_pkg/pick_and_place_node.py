@@ -93,8 +93,9 @@ class PickAndPlaceNode(Node):
             self._angle_cb,
             10,
             callback_group=self._cb_group)
-        self._spin_angle = 0.0
-        self._angle_event = threading.Event()  # SPIN_CHUCK 전 각도 수신 대기용
+        self._spin_angle        = 0.0
+        self._angle_received_at = 0.0   # 마지막 /object_angle 수신 시각
+        self._pick_start_time   = 0.0   # _execute_inner 시작 시각 (GRACE_PERIOD 기준)
 
         self.depth_info_pub = self.create_publisher(Float32MultiArray, '/object_depth_data', 10) ####################각도 변환 준수가 쓰는 데이터####################3
 
@@ -226,8 +227,8 @@ class PickAndPlaceNode(Node):
             self._tcp_received.set()
 
     def _angle_cb(self, msg: Float32):
-        self._spin_angle = float(msg.data)
-        self._angle_event.set()
+        self._spin_angle        = float(msg.data)
+        self._angle_received_at = time.time()
         self.get_logger().info(f'[TOPIC] Received object_angle: {self._spin_angle:.1f}°')
 
     # ── 액션 콜백 ─────────────────────────────────────────────────────────
@@ -267,11 +268,35 @@ class PickAndPlaceNode(Node):
 
     async def _execute_inner(self, goal_handle, goal, result):
 
-        # 픽 시작 시 각도 이벤트 초기화 (이전 픽의 각도 재사용 방지)
-        self._angle_event.clear()
-        self._spin_angle = 0.0
+        # 픽 시작 시각 기록 (GRACE_PERIOD로 유효 각도 판별)
+        # _angle_event.clear() 제거: workspace_scan_node가 픽 전에 각도를 미리 계산하므로
+        # clear() 하면 이미 도착한 유효한 각도가 지워짐
+        self._spin_angle        = 0.0
+        self._angle_received_at = 0.0   # 이전 픽의 타임스탬프가 GRACE_PERIOD 체크를 오통과하는 것을 방지
+        self._pick_start_time   = time.time()
 
         from_scan = bool(goal.from_scan)
+
+        # ── from_scan 픽: APPROACH 전에 각도 수신 완료까지 대기 ────────────
+        # workspace_scan_node가 centering movel + time.sleep() 후 /voice_intent를 발행하므로
+        # /selected_object → /_2d_to_3d_point → /z_edge_marker 5샘플 → /object_angle
+        # 파이프라인이 완료될 때까지 여기서 블록해야 APPROACH(카메라 이동) 전에 각도 확정됨.
+        if from_scan:
+            ANGLE_WAIT_SEC = 15.0
+            _wait_start = time.time()
+            while self._angle_received_at == 0.0:
+                elapsed = time.time() - _wait_start
+                if elapsed >= ANGLE_WAIT_SEC:
+                    break
+                time.sleep(0.05)
+            elapsed = time.time() - _wait_start
+            if self._angle_received_at != 0.0:
+                self.get_logger().info(
+                    f'[ANGLE READY] 센터링 위치 각도 수신 완료: {self._spin_angle:.1f}°  '
+                    f'({elapsed:.2f}s 대기)')
+            else:
+                self.get_logger().warn(
+                    f'[ANGLE TIMEOUT] {ANGLE_WAIT_SEC:.0f}s 내 /object_angle 미수신 — 0.0° 폴백')
 
         # ── TCP 획득: GetCurrentPosx 서비스 우선, 상태 토픽 fallback ──────
         # dsr_hw_interface2 드라이버가 /dsr01/state 토픽을 발행하지 않는 경우가 있어
@@ -648,10 +673,22 @@ class PickAndPlaceNode(Node):
         이후 DESCEND / LIFT 등 모든 단계가 갱신된 rz를 그대로 유지한다.
         target_rz = 현재 rz + spin_angle(물체 각도 오프셋) + SPIN_ANGLE_OFFSET(프레임 보정)
         """
-        # /object_angle 수신 대기 (최대 2초, 미수신 시 0.0° 사용)
-        got = self._angle_event.wait(timeout=2.0)
+        # workspace_scan_node가 픽 전에 각도를 미리 계산해 두었으므로
+        # _pick_start_time 기준 GRACE_PERIOD 이내에 수신된 각도는 유효하게 처리.
+        # (이전 물체의 각도는 GRACE_PERIOD 초과 → 자동 무시)
+        GRACE_PERIOD = 15.0   # 픽 시작 15초 전까지 수집된 각도 유효 (이전 물체 각도 차단)
+        SPIN_TIMEOUT = 30.0   # 각도 미도착 시 추가 최대 30초 대기
+
+        deadline = time.time() + SPIN_TIMEOUT
+        got = False
+        while time.time() < deadline:
+            if self._angle_received_at >= (self._pick_start_time - GRACE_PERIOD):
+                got = True
+                break
+            time.sleep(0.05)
         if not got:
-            self.get_logger().warn('[SPIN_CHUCK] /object_angle 미수신 (2s) — 0.0° 사용')
+            self.get_logger().warn(
+                f'[SPIN_CHUCK] /object_angle 미수신 ({SPIN_TIMEOUT:.0f}s) — 0.0° 사용')
 
         current_rz = pt[5]
         target_rz  = current_rz + self._spin_angle + SPIN_ANGLE_OFFSET

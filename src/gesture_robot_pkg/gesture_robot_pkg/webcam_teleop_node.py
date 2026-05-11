@@ -276,6 +276,14 @@ class WebcamTeleopNode(Node):
         future = self._move_cli.call_async(req)
         future.add_done_callback(self._move_done_cb)
 
+        # 뚝뚝거림 해결: radius가 이동 거리를 넘지 않게 리미트 걸기
+        total_dist = sum(abs(d) for d in delta)
+
+        req.radius = min(
+            max(ABS_BLEND_R, total_dist * 0.5),  # 기존 로직 (하한 보장)
+            total_dist * 0.45                     # 상한: 이동 거리의 45% 초과 금지
+        )
+        
     def _move_done_cb(self, future):
         try:
             res = future.result()

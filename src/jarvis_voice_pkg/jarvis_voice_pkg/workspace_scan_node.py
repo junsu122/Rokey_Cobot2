@@ -45,7 +45,7 @@ from rclpy.node import Node
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.callback_groups import ReentrantCallbackGroup
 from sensor_msgs.msg import Image, CameraInfo
-from std_msgs.msg import String
+from std_msgs.msg import Bool, String
 
 # ── 로봇 식별자 ────────────────────────────────────────────────────────────────
 ROBOT_ID    = "dsr01"
@@ -65,14 +65,14 @@ DR_init.__dsr__id    = ROBOT_ID
 DR_init.__dsr__model = ROBOT_MODEL
 
 # ── 스캔 작업공간 정의 (scan.py 동일) ──────────────────────────────────────────
-LEFT_TOP_POSE     = [204.21, 71.58, 217.67, 12.75, 179.54,12.52]
-RIGHT_BOTTOM_POSE = [508.4, -263.78, 215.56, 178.78, -179.82, 178.67]
+LEFT_TOP_POSE     = [237.47,81.55,188.77,179.67,-179.69,179.63]
+RIGHT_BOTTOM_POSE = [513.16,-262.44,187.29,148.58,-179.14,148.61]
 
 X_MIN  = LEFT_TOP_POSE[0]
 X_MAX  = RIGHT_BOTTOM_POSE[0]
 Y_MAX  = LEFT_TOP_POSE[1]
 Y_MIN  = RIGHT_BOTTOM_POSE[1]
-Z_SCAN = 370.0
+Z_SCAN = (LEFT_TOP_POSE[2] + RIGHT_BOTTOM_POSE[2]) / 2  # 188.03mm
 
 RX = LEFT_TOP_POSE[3]
 RY = LEFT_TOP_POSE[4]
@@ -83,8 +83,8 @@ ROBOT_MODE_AUTONOMOUS = 1
 UNSAFE_STATES         = {3, 5, 6}
 
 # ── 기본 파라미터 ───────────────────────────────────────────────────────────────
-DEFAULT_NX                      = 3
-DEFAULT_NY                      = 3
+DEFAULT_NX                      = 2
+DEFAULT_NY                      = 2
 DEFAULT_VEL                     = 60.0
 DEFAULT_ACC                     = 60.0
 DEFAULT_CAPTURE_WAIT_SEC        = 0.8
@@ -146,7 +146,7 @@ class WorkspaceScanNode(Node):
         self.declare_parameter("vel",                       DEFAULT_VEL)
         self.declare_parameter("acc",                       DEFAULT_ACC)
         self.declare_parameter("capture_wait_sec",          DEFAULT_CAPTURE_WAIT_SEC)
-        self.declare_parameter("centering_wait_sec",        0.3)   # 센터링 후 안정화 대기(초)
+        self.declare_parameter("centering_wait_sec",        1.5)   # 센터링 후 안정화 대기(초) — 포인트클라우드 갱신 여유
         self.declare_parameter("detection_window_sec",      DEFAULT_DETECTION_WINDOW_SEC)
         self.declare_parameter("log_file_path",             DEFAULT_LOG_FILE_PATH)
         self.declare_parameter("pose_distance_threshold",   DEFAULT_POSE_DISTANCE_THRESHOLD)
@@ -177,6 +177,10 @@ class WorkspaceScanNode(Node):
         self.scan_records     : list      = []
         self.summary_written  : bool      = False
         self.robot_api        : dict      = {}
+
+        # ── 픽 완료 감지 (/is_picking 구독) ───────────────────────────────
+        self._is_picking_ext       : bool             = False
+        self._pick_complete_event  : threading.Event  = threading.Event()
 
         # ── 카메라 / VLM ──────────────────────────────────────────────────
         self._latest_frame    : object      = None
@@ -214,6 +218,11 @@ class WorkspaceScanNode(Node):
         self.create_subscription(
             CameraInfo, '/camera/camera/color/camera_info',
             self._on_camera_info, 10,
+            callback_group=self._sub_cb_group)
+
+        self.create_subscription(
+            Bool, '/is_picking',
+            self._on_is_picking, 10,
             callback_group=self._sub_cb_group)
 
         # ── 발행 ───────────────────────────────────────────────────────────
@@ -291,6 +300,35 @@ class WorkspaceScanNode(Node):
                 self._latest_frame = frame
         except Exception as exc:
             self.get_logger().warn(f"카메라 프레임 수신 오류: {exc}")
+
+    def _on_is_picking(self, msg: Bool):
+        """is_picking False→True→False 전환 감지 → _pick_complete_event 발생"""
+        prev = self._is_picking_ext
+        self._is_picking_ext = msg.data
+        if prev and not msg.data:
+            self._pick_complete_event.set()
+
+    def _wait_for_pick_complete(self, timeout: float = 120.0) -> bool:
+        """
+        픽이 시작(is_picking=True)된 후 완료(is_picking=False)될 때까지 대기.
+        반환: 정상 완료=True, 타임아웃/취소=False
+        """
+        # 픽 시작 대기 (최대 30초)
+        start_deadline = time.time() + 30.0
+        while not self._is_picking_ext and time.time() < start_deadline:
+            if self.cancel_requested:
+                return False
+            time.sleep(0.2)
+        if not self._is_picking_ext:
+            self.get_logger().warn('[WAIT_PICK] 픽 시작 안 됨 (30s 타임아웃)')
+            return False
+
+        # 픽 완료 대기
+        self._pick_complete_event.clear()
+        completed = self._pick_complete_event.wait(timeout=timeout)
+        if not completed:
+            self.get_logger().warn(f'[WAIT_PICK] 픽 완료 타임아웃 ({timeout:.0f}s)')
+        return completed
 
     def _on_camera_info(self, msg: CameraInfo):
         """카메라 인트린식 수신 → 저장 (센터링 계산용)"""
@@ -429,7 +467,7 @@ class WorkspaceScanNode(Node):
                 f"감지 가능 물체 목록(영문 키 사용): {all_str}\n\n"
                 f"각 물체의 바운딩박스를 픽셀 좌표(x1, y1, x2, y2)로 표시하고,\n"
                 f"해당 물체가 맞을 확률(confidence 0.0~1.0)을 추정하세요.\n\n"
-                f"응답 형식:\n"
+                f"JSON 형식으로만 답변하세요. 응답 형식:\n"
                 f'{{"objects": [{{"name": "영문물체이름", "confidence": 0.95, "bbox": [x1, y1, x2, y2]}}]}}\n'
                 f"물체가 없으면: {{\"objects\": []}}"
             )
@@ -725,7 +763,6 @@ class WorkspaceScanNode(Node):
         self.summary_written    = False
         found_objects_map       : dict = {}
         cancelled               = False
-        direct_pick_triggered   = False   # 조기 발견 → 직접 픽 트리거 여부
 
         set_robot_mode(ROBOT_MODE_AUTONOMOUS)
         set_tool(ROBOT_TOOL)
@@ -758,6 +795,10 @@ class WorkspaceScanNode(Node):
 
             detections = self._collect_detections_at_pose()
 
+            if not detections and not self.cancel_requested:
+                self.get_logger().info("  탐지 없음 → 1회 재시도")
+                detections = self._collect_detections_at_pose()
+
             record = {
                 "scan_index": index,
                 "total"     : total,
@@ -779,95 +820,71 @@ class WorkspaceScanNode(Node):
             if not detections:
                 self.get_logger().info("  (탐지 없음)")
 
-            # 타겟 물체 모두 발견 시 → 즉시 센터링 + 직접 픽 트리거
+            # 타겟 물체 모두 발견 시 → 스캔 조기 종료 (픽은 아래 공통 블록에서 처리)
             if self.target_objects:
                 remaining = [t for t in self.target_objects
                              if t not in found_objects_map]
                 if not remaining:
                     self.get_logger().info(
-                        f"✅ 모든 타겟 발견 [{index}/{total}] "
-                        f"→ 즉시 센터링 후 vision_node 직접 트리거")
-                    # /scan_result를 먼저 발행 → orchestrator가 _next_pick_from_scan=True 세팅
-                    # 이후 /voice_intent → /selected_object 도착 전에 플래그가 준비됨 (레이스 컨디션 방지)
-                    self._publish_scan_result(
-                        list(found_objects_map.values()),
-                        cancelled=False, voice_intent_sent=True)
-                    time.sleep(0.05)  # DDS 전달 여유
-                    for name, obj in list(found_objects_map.items()):
-                        if self.cancel_requested:
-                            cancelled = True
-                            break
-                        # 센터링: VLM bbox 기준으로 로봇을 물체 중앙으로 이동
-                        centered = self._compute_centering_pose(
-                            obj['best_pose'], obj.get('box', []))
-                        if centered is not None:
-                            self.get_logger().info(
-                                f'[CENTER] {name}: '
-                                f'({obj["best_pose"][0]:.1f},'
-                                f'{obj["best_pose"][1]:.1f})'
-                                f' → ({centered[0]:.1f},{centered[1]:.1f})')
-                            movel(centered, vel=self.vel, acc=self.acc,
-                                  mod=move_mod_abs)
-                            wait(self.centering_wait_sec)
-                            obj['best_pose'] = centered
-                        else:
-                            self.get_logger().warn(
-                                f'[CENTER] {name}: 계산 불가 — 현재 포즈 유지')
-                        # vision_node에 직접 /voice_intent 발행
-                        self._publish_voice_intent_direct(name, obj['best_pose'])
-                    if not cancelled:
-                        direct_pick_triggered = True
+                        f"✅ 모든 타겟 발견 [{index}/{total}] → 스캔 조기 종료")
                     break
 
-        # ── 센터링: 조기 종료 아닌 경우(모든 포즈 소진)에만 후처리 센터링 ──
-        if found_objects_map and not cancelled and not direct_pick_triggered:
+        # ── 발견 물체 순차 처리: 센터링 → 픽 트리거 → 완료 대기 ──────────────
+        # 물체마다 (1)센터링으로 로봇을 물체 위로 이동 (2)/voice_intent 발행
+        # (3)픽 완료 대기 후 다음 물체로 진행.
+        # → 항상 해당 물체 위에서 YOLO/depth 계산이 이루어져 정확한 픽 가능.
+
+        # 스캔 도중 진행 중이던 픽이 있으면 완료 대기 후 시작
+        if self._is_picking_ext:
+            self.get_logger().info('[CENTER+PICK] 이전 픽 완료 대기 중...')
+            self._pick_complete_event.clear()
+            if not self._pick_complete_event.wait(timeout=120.0):
+                self.get_logger().warn('[CENTER+PICK] 이전 픽 완료 타임아웃 — 강제 진행')
+
+        if found_objects_map and not cancelled:
             self.get_logger().info(
-                f'[CENTER] {list(found_objects_map.keys())} 센터링 시작')
-            for name, obj in found_objects_map.items():
+                f'[CENTER+PICK] 순차 처리 시작: {list(found_objects_map.keys())}')
+            for name, obj in list(found_objects_map.items()):
                 if self.cancel_requested:
                     cancelled = True
                     break
+
+                # ① 센터링
                 centered = self._compute_centering_pose(
                     obj['best_pose'], obj.get('box', []))
-                if centered is None:
-                    self.get_logger().warn(
-                        f'[CENTER] {name}: 포즈 계산 불가 — 원본 포즈 유지')
-                    continue
-
-                prev_xy  = obj['best_pose'][:2]
-                self.get_logger().info(
-                    f'[CENTER] {name}: '
-                    f'({prev_xy[0]:.1f},{prev_xy[1]:.1f}) → '
-                    f'({centered[0]:.1f},{centered[1]:.1f})')
-                movel(centered, vel=self.vel, acc=self.acc, mod=move_mod_abs)
-                wait(self.centering_wait_sec)
-
-                # 센터링 위치에서 VLM 재확인
-                recheck   = self._collect_detections_at_pose()
-                confirmed = False
-                for det in recheck:
-                    if det['name'] == name:
-                        obj['best_pose'] = centered
-                        obj['box']       = det.get('box', obj.get('box', []))
-                        confirmed        = True
-                        self.get_logger().info(
-                            f'[CENTER] ✅ {name} VLM 재확인 완료 '
-                            f'(conf={det["conf"]:.2f})')
-                        break
-                if not confirmed:
-                    # VLM이 못 봐도 센터링 포즈를 best_pose로 업데이트
+                if centered is not None:
+                    self.get_logger().info(
+                        f'[CENTER] {name}: '
+                        f'({obj["best_pose"][0]:.1f},{obj["best_pose"][1]:.1f})'
+                        f' → ({centered[0]:.1f},{centered[1]:.1f})')
+                    movel(centered, vel=self.vel, acc=self.acc, mod=move_mod_abs)
+                    # DSR wait()는 모션 큐 명령이므로 Python은 즉시 반환됨.
+                    # 포인트클라우드가 새 위치에서 안정화될 때까지 실제로 대기해야 함.
+                    time.sleep(self.centering_wait_sec)
                     obj['best_pose'] = centered
+                else:
                     self.get_logger().warn(
-                        f'[CENTER] ⚠️ {name} VLM 재확인 실패 — 센터링 포즈 업데이트')
+                        f'[CENTER] {name}: 계산 불가 — 현재 포즈 유지')
+
+                # ② vision_node에 직접 /voice_intent 발행 → 픽 트리거
+                # 각도 계산은 selected_object 발행 후 SelectedObjectTo3DNode가
+                # 자동으로 _2d_to_3d_point 변환 → pick_and_place_node SPIN_CHUCK 전 도착
+                if not self.cancel_requested:
+                    self._publish_voice_intent_direct(name, obj['best_pose'])
+
+                # ③ 픽 완료 대기 (다음 물체로 넘어가기 전)
+                if not self.cancel_requested:
+                    self._wait_for_pick_complete(timeout=120.0)
 
         found_list = list(found_objects_map.values())
         self.get_logger().info(
             f"스캔 {'취소' if cancelled else '완료'} — "
             f"발견: {[o['name'] for o in found_list]}")
 
-        if not direct_pick_triggered:
-            self._publish_scan_result(found_list, cancelled=cancelled,
-                                      voice_intent_sent=False)
+        # 모든 픽 완료 후 scan_result 발행 (publisher.py TTS/상태 알림용)
+        voice_intent_sent = bool(found_list and not cancelled)
+        self._publish_scan_result(found_list, cancelled=cancelled,
+                                  voice_intent_sent=voice_intent_sent)
 
         if self.scan_records:
             summary = self.build_final_summary(self.scan_records)

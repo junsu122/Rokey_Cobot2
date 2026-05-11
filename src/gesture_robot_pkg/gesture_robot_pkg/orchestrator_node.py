@@ -56,6 +56,9 @@ class OrchestratorNode(Node):
         self.create_subscription(
             String, '/scan_result', self._scan_result_cb, 10,
             callback_group=self._cb_group)
+        self.create_subscription(
+            String, '/voice_intent', self._voice_intent_cb, 10,
+            callback_group=self._cb_group)
 
         # ── PickAndPlace 액션 클라이언트 ────────────
         self._pick_client = ActionClient(
@@ -89,15 +92,27 @@ class OrchestratorNode(Node):
             self._current_pos  = list(msg.current_posx)
             self._pos_received = True
 
+    def _voice_intent_cb(self, msg: String):
+        """
+        /voice_intent 수신 시 from_scan=True 확인 → _next_pick_from_scan 세팅.
+        workspace_scan_node가 각 물체마다 voice_intent를 직접 발행하므로
+        첫 번째뿐 아니라 두 번째, 세 번째 픽에도 from_scan=True가 적용됨.
+        """
+        try:
+            data = json.loads(msg.data)
+            if data.get('from_scan'):
+                self._next_pick_from_scan = True
+                self.get_logger().info(
+                    '[VOICE_INTENT] from_scan=True → 다음 픽 HOME 스킵 예약')
+        except Exception as e:
+            self.get_logger().warn(f'[VOICE_INTENT CB] 파싱 오류: {e}')
+
     def _scan_result_cb(self, msg: String):
-        """스캔 결과 수신 → 다음 픽은 스캔 위치에서 수행 (HOME 스킵)"""
+        """스캔 결과 수신 (TTS/상태 확인용 — 픽은 workspace_scan_node가 완료 후 발행)"""
         try:
             data   = json.loads(msg.data)
             status = data.get('status', '')
-            if status == 'found':
-                self._next_pick_from_scan = True
-                self.get_logger().info(
-                    '[SCAN] found → 다음 픽은 스캔 위치에서 수행 (from_scan=True)')
+            self.get_logger().info(f'[SCAN RESULT] status={status}')
         except Exception as e:
             self.get_logger().warn(f'[SCAN RESULT] 파싱 오류: {e}')
 
