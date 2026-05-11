@@ -65,8 +65,8 @@ DR_init.__dsr__id    = ROBOT_ID
 DR_init.__dsr__model = ROBOT_MODEL
 
 # ── 스캔 작업공간 정의 (scan.py 동일) ──────────────────────────────────────────
-LEFT_TOP_POSE     = [148.70,  232.47, 418.42,  50.79,  179.79,  50.48]
-RIGHT_BOTTOM_POSE = [584.66, -289.88, 401.80, 166.77, -179.44, 166.46]
+LEFT_TOP_POSE     = [204.21, 71.58, 217.67, 12.75, 179.54,12.52]
+RIGHT_BOTTOM_POSE = [508.4, -263.78, 215.56, 178.78, -179.82, 178.67]
 
 X_MIN  = LEFT_TOP_POSE[0]
 X_MAX  = RIGHT_BOTTOM_POSE[0]
