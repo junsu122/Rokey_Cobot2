@@ -4,6 +4,12 @@ ROS2 + WebRTC 기반 음성·제스처·비전 통합 협동로봇 제어 시스
 
 ---
 
+## 시스템 다이어그램
+
+> 📐 [senior.drawio](./senior.drawio) — draw.io에서 열어 전체 구조 확인 가능
+
+---
+
 ## 구동 방법
 
 ### 1. ROS2 빌드
