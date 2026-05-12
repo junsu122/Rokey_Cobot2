@@ -1,0 +1,5 @@
+{
+  "deploy": {
+    "numReplicas": 1
+  }
+}
