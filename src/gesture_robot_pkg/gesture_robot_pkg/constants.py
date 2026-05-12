@@ -71,7 +71,7 @@ LIFT_MAX_MM     = 200.0
 # → 물체가 얇을수록 절반보다 조금 높은 위치에서 멈춰 테이블 충돌 방지.
 # 그리퍼 손가락이 테이블에 닿는 경우 이 값을 늘려서 튜닝.
 GRIPPER_TABLE_CLEARANCE_MM = 8.0
-GRIPPER_FINGER_LENGTH_MM   = 39.0  # RG2 손가락 파지 가능 길이(mm), 메뉴얼 Work Range 기준
+PICK_EXTRA_DESCENT_MM      = 60.0  # 기본 하강량에 추가로 더 내려가는 거리(mm)
 SPIN_ANGLE_OFFSET          = 0.0   # 센서 프레임↔로봇 베이스 프레임 yaw 오차 보정값(deg), 실측 후 튜닝
 
 # ── 물체 방향 보정 ────────────────────────────────────────────────────
