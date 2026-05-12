@@ -22,13 +22,13 @@ def generate_launch_description():
         parameters=[{'robot_id': LaunchConfiguration('robot_id')}] # 파라미터 전달
     )
 
-    # Hand Recovery 노드
-    hand_recovery_node = Node(
-        package='robot_state_control',
-        executable='hand_recovery_node',
-        name='hand_recovery_node',
-        output='screen'
-    )
+    # # Hand Recovery 노드
+    # hand_recovery_node = Node(
+    #     package='robot_state_control',
+    #     executable='hand_recovery_node',
+    #     name='hand_recovery_node',
+    #     output='screen'
+    # )
 
     emergency_stop_node = Node(
         package='robot_state_control',
@@ -48,7 +48,7 @@ def generate_launch_description():
     return LaunchDescription([
         robot_id_arg,
         exception_manager_node,
-        hand_recovery_node,
+        # hand_recovery_node,
         emergency_stop_node,
         main_node
     ])
