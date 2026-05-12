@@ -1,36 +1,6 @@
 """
 pick_and_place_node.py
 ──────────────────────────────────────────────────────────
-[수정 사항]
-  ★ v2 핵심 버그 제거
-      self.executor.create_task() — executor 미설정으로 AttributeError 발생
-      → 모든 스테이지가 즉시 실패해 로봇이 전혀 움직이지 않던 원인
-      → v1 방식(단순 await + threading.Event)으로 복원
-
-  ★ descent 계산식 v6 복원
-      v2: np.clip(h*0.5, min(DESCENT_MIN_MM, h*0.4), DESCENT_MAX_MM)
-      → v6: np.clip(h*0.5, DESCENT_MIN_MM, DESCENT_MAX_MM)
-
-  ★ 속도 향상
-      PICK_VEL / PICK_ACC 를 constants.py 에서 가져옴 (200 mm/s)
-
-  ★ [FIX] 하강 목표 Z 안전 범위 검증 추가
-      pick_target[2] 만 체크하던 기존 코드에서
-      실제 하강 목표 Z (pick_target[2] - descent_d) 도 PICK_SAFE_Z_MIN_MM 와 비교
-      → DSR 이 모션 거부하던 원인 제거
-
-  ★ [FIX] 하강 속도 0 방어 처리
-      PICK_VEL // 2 가 0 이 되는 경우를 max(1, ...) 로 방어
-
-  ★ [FIX] obj_height_mm 진단 로그 강화
-      하강량이 너무 작을 때 원인 파악 가능하도록 로그 추가
-
-[설계 유지]
-  - sync_type=0 : 각 이동 완료 후 다음 단계 진행 (DSR SYNC=0, ASYNC=1)
-  - MultiThreadedExecutor + ReentrantCallbackGroup
-  - threading.Event 로 TCP 대기 (MultiThreadedExecutor 에서는 블로킹 OK)
-  - rclpy.task.Future 직접 await (asyncio 미사용)
-  - 깊이 기반 3D 위치 추정 (v6 3-step 알고리즘)
 
 책임:
   1. PickAndPlace 액션 서버
@@ -70,14 +40,14 @@ from gesture_robot_pkg.constants import (
     PICK_MIN_DEPTH_MM, PICK_MAX_DEPTH_MM, DEPTH_SAMPLE_MARGIN,
     APPROACH_MIN_MM, APPROACH_MAX_MM,
     LIFT_MIN_MM, LIFT_MAX_MM,
-    PICK_EXTRA_DESCENT_MM,
+    GRIPPER_FINGER_LENGTH_MM,
     GRIPPER_TABLE_CLEARANCE_MM,
     SPIN_ANGLE_OFFSET,
     HOME_JOINT, GIVE_JOINT, WAY_POINT_JOINT, GIVE_LINE,
     PICK_SAFE_Z_MIN_MM, PICK_SAFE_Z_MAX_MM,
     PICK_OFFSET_X_MM, PICK_OFFSET_Y_MM, PICK_OFFSET_Z_MM,
 )
-from gesture_robot_pkg.utils import transform_camera_to_base, get_orientation_offset
+from gesture_robot_pkg.utils import transform_camera_to_base
 
 
 class PickAndPlaceNode(Node):
@@ -493,7 +463,7 @@ class PickAndPlaceNode(Node):
         # ── 좌표 보정 offset 적용 (constants.py 에서 튜닝) ───────────────
         base_xyz[0] += PICK_OFFSET_X_MM
         base_xyz[1] += PICK_OFFSET_Y_MM
-        base_xyz[2] += PICK_OFFSET_Z_MM
+
         if any(abs(v) > 0.01 for v in [PICK_OFFSET_X_MM, PICK_OFFSET_Y_MM, PICK_OFFSET_Z_MM]):
             self.get_logger().info(
                 f'[OFFSET] 보정 적용: '
@@ -502,6 +472,8 @@ class PickAndPlaceNode(Node):
 
         orientation = list(robot_tcp[3:])
         pick_target = list(base_xyz) + orientation
+        # 테이블 표면 Z=0 기준으로 pick_target Z 보정
+        pick_target[2] = obj_height_robot_z + PICK_OFFSET_Z_MM
 
         # ── 워크스페이스 Z 안전 범위 검증 ──────────────────────────────
         self.get_logger().info(
@@ -536,12 +508,13 @@ class PickAndPlaceNode(Node):
         # 단, 그리퍼 손가락이 테이블에 닿지 않도록 여유(GRIPPER_TABLE_CLEARANCE_MM) 확보:
         #   조건: h - descent_d >= GRIPPER_TABLE_CLEARANCE_MM
         #
-        # descent_d = min(h/2, h - clearance)
-        #   물체가 충분히 두꺼우면 → h/2 (중심 파지)
-        #   물체가 얇으면 → h - clearance (테이블 충돌 방지 우선)
+        # descent_d = min(h/2, GRIPPER_FINGER_LENGTH_MM, h - GRIPPER_TABLE_CLEARANCE_MM)
+        #   낮은 물체       → h/2 (중심 파지)
+        #   높은 물체       → 손가락 길이(39mm)로 제한
+        #   아주 얇은 물체  → h - clearance (테이블 충돌 방지 우선)
         h          = float(obj_height_robot_z)
         approach_h = float(np.clip(h * 1.0, APPROACH_MIN_MM, APPROACH_MAX_MM))
-        descent_d  = min(float(h * 0.5) + PICK_EXTRA_DESCENT_MM, h - GRIPPER_TABLE_CLEARANCE_MM)
+        descent_d  = max(0.0, min(h * 0.5, GRIPPER_FINGER_LENGTH_MM, h - GRIPPER_TABLE_CLEARANCE_MM))
         lift_h     = float(np.clip(h * 1.5, LIFT_MIN_MM,     LIFT_MAX_MM))
 
         self.get_logger().info(
