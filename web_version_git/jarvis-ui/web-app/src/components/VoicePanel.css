@@ -1,0 +1,146 @@
+/* VoicePanel.css — 따뜻한 테마 */
+
+.vp-root {
+  display: flex; flex-direction: column;
+  gap: 8px; padding: 10px 14px;
+  background: #F2EBE0;
+  border: 1.5px solid rgba(107,66,38,0.18);
+  border-radius: 10px;
+  box-shadow: 0 2px 8px rgba(107,66,38,0.08);
+}
+
+.vp-header {
+  display: flex; align-items: center; justify-content: space-between;
+}
+.vp-title {
+  font-family: 'Nanum Gothic', sans-serif;
+  font-size: 13px; font-weight: 800;
+  letter-spacing: 1px; color: #6B4226;
+}
+.vp-mic-area { display: flex; align-items: center; gap: 8px; }
+.vp-listening-label {
+  font-family: 'Nanum Gothic', sans-serif;
+  font-size: 13px; color: #C0503A; font-weight: 700;
+  animation: vp-blink 1s ease infinite;
+}
+@keyframes vp-blink { 0%,100%{opacity:1} 50%{opacity:0.4} }
+
+.vp-mic-btn {
+  width: 36px; height: 36px; border-radius: 50%;
+  border: 1.5px solid rgba(107,66,38,0.30);
+  background: rgba(107,66,38,0.08);
+  color: #6B4226; font-size: 16px; cursor: pointer;
+  transition: all 0.2s;
+  display: flex; align-items: center; justify-content: center;
+}
+.vp-mic-btn:hover:not(:disabled) {
+  background: rgba(107,66,38,0.15); transform: scale(1.05);
+}
+.vp-mic-btn.listening {
+  background: rgba(90,122,58,0.12);
+  border-color: rgba(90,122,58,0.45);
+  box-shadow: 0 0 8px rgba(90,122,58,0.25);
+  animation: vp-breathe 2s ease infinite;
+}
+.vp-mic-btn.active {
+  background: rgba(192,80,58,0.12);
+  border-color: rgba(192,80,58,0.45);
+  box-shadow: 0 0 12px rgba(192,80,58,0.40);
+  animation: vp-pulse 0.6s ease infinite;
+}
+.vp-mic-btn.disabled, .vp-mic-btn:disabled { opacity: 0.35; cursor: not-allowed; }
+@keyframes vp-breathe {
+  0%,100%{ box-shadow: 0 0 6px rgba(90,122,58,0.2); }
+  50%    { box-shadow: 0 0 14px rgba(90,122,58,0.5); }
+}
+@keyframes vp-pulse {
+  0%,100%{ box-shadow: 0 0 8px rgba(192,80,58,0.4); transform: scale(1); }
+  50%    { box-shadow: 0 0 18px rgba(192,80,58,0.7); transform: scale(1.08); }
+}
+
+/* ── 웨이크업 상태 ── */
+.vp-wake-status {
+  display: flex; align-items: center; gap: 8px;
+  padding: 7px 10px;
+  background: rgba(90,122,58,0.08);
+  border-radius: 8px;
+  border: 1px dashed rgba(90,122,58,0.35);
+  font-family: 'Nanum Gothic', sans-serif;
+  font-size: 12px; color: #4A6B2A;
+}
+.vp-wake-dot {
+  width: 7px; height: 7px; border-radius: 50%;
+  background: #7A9E5A; flex-shrink: 0;
+  animation: vp-breathe 2s ease infinite;
+}
+
+/* ── 명령 대기 상태 ── */
+.vp-command-status {
+  display: flex; flex-direction: column; gap: 5px;
+  padding: 7px 10px;
+  background: rgba(192,80,58,0.08);
+  border-radius: 8px;
+  border: 1px solid rgba(192,80,58,0.30);
+  font-family: 'Nanum Gothic', sans-serif;
+  font-size: 13px; color: #C0503A; font-weight: 700;
+}
+.vp-command-bar {
+  width: 100%; height: 5px;
+  background: rgba(192,80,58,0.15);
+  border-radius: 3px; overflow: hidden;
+}
+.vp-command-progress {
+  height: 100%;
+  background: #C0503A;
+  border-radius: 3px;
+  transition: width 1s linear;
+}
+
+.vp-command-label {
+  font-family: 'Nanum Gothic', sans-serif;
+  font-size: 13px; color: #C0503A; font-weight: 700;
+  animation: vp-blink 0.6s ease infinite;
+}
+
+.vp-stt {
+  display: flex; align-items: center; gap: 8px;
+  padding: 7px 10px;
+  background: rgba(107,66,38,0.06);
+  border-radius: 8px;
+  border-left: 3px solid #8B5E3C;
+}
+.vp-stt-icon { font-size: 14px; }
+.vp-stt-text { font-family: 'Nanum Gothic', sans-serif; font-size: 13px; color: #2D1F14; }
+
+.vp-tts {
+  display: flex; align-items: flex-start; gap: 8px;
+  padding: 7px 10px;
+  background: rgba(90,122,58,0.07);
+  border-radius: 8px;
+  border-left: 3px solid #5A7A3A;
+}
+.vp-tts-icon { font-size: 14px; flex-shrink: 0; }
+.vp-tts-text { font-family: 'Nanum Gothic', sans-serif; font-size: 13px; color: #3A5A20; line-height: 1.5; }
+
+.vp-intent {
+  display: flex; flex-direction: column; gap: 4px;
+  padding: 8px 10px;
+  background: rgba(107,66,38,0.04);
+  border-radius: 8px; border-left: 3px solid;
+}
+.vp-intent-row { display: flex; align-items: center; gap: 8px; }
+.vp-intent-key {
+  font-family: 'Nanum Gothic', sans-serif;
+  font-size: 8px; letter-spacing: 1px;
+  color: #A89080; min-width: 44px; font-weight: 700;
+}
+.vp-intent-val {
+  font-family: 'DM Mono', monospace;
+  font-size: 11px; color: #2D1F14; font-weight: 500;
+}
+
+.vp-idle {
+  font-family: 'Nanum Gothic', sans-serif;
+  font-size: 12px; color: #B0988A;
+  text-align: center; padding: 4px 0;
+}
