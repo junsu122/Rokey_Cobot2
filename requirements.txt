@@ -1,0 +1,20 @@
+# --- 핵심 연산 및 기하학 ---
+numpy
+scipy
+shapely
+alphashape
+
+# --- AI & Vision (객체 탐지 및 손 추적) ---
+ultralytics
+mediapipe
+opencv-python
+torch
+torchvision
+
+# --- 통신 및 WebRTC ---
+aiortc
+aiohttp
+flask
+
+# --- 로봇 제어 (특정 버전 유지) ---
+pymodbus==2.5.3
